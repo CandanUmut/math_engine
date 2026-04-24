@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PRU Math Engine</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span class="brand-name">PRU Math Engine</span>
+      <span class="brand-phase">phase 1 · sympy</span>
+    </div>
+    <div class="topbar-stats" id="stats">
+      <span class="stat"><span class="stat-label">problems</span> <span id="stat-problems">–</span></span>
+      <span class="stat"><span class="stat-label">attempts</span> <span id="stat-attempts">–</span></span>
+      <span class="stat"><span class="stat-label">verified</span> <span id="stat-verified">–</span></span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card input-card">
+      <h2>Solve</h2>
+      <p class="hint">Enter SymPy syntax, LaTeX, or a natural-language question.</p>
+      <textarea id="input" rows="4" spellcheck="false"
+        placeholder="e.g. solve x^2 - 5*x + 6 = 0
+e.g. \int_{0}^{1} x^2 dx
+e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
+      <div class="row">
+        <button id="solve-btn">Solve</button>
+        <span id="hint" class="subtle"></span>
+      </div>
+    </section>
+
+    <section class="card answer-card" id="answer-card" hidden>
+      <h2>Answer</h2>
+      <div class="answer" id="answer">—</div>
+      <div class="answer-meta" id="answer-meta"></div>
+    </section>
+
+    <section class="card trace-card" id="trace-card" hidden>
+      <h2>Reasoning trace</h2>
+      <ol class="trace" id="trace"></ol>
+    </section>
+
+    <section class="card fp-card" id="fp-card" hidden>
+      <h2>Fingerprint</h2>
+      <pre id="fp"></pre>
+    </section>
+
+    <section class="card recent-card">
+      <h2>Recent problems</h2>
+      <div id="recent"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
