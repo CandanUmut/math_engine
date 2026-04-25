@@ -20,6 +20,7 @@ os.environ.setdefault("OLLAMA_ENABLED", "false")
 
 import pytest  # noqa: E402
 
+from pru_math.graph import RelationalGraph  # noqa: E402
 from pru_math.store import Store  # noqa: E402
 
 
@@ -27,3 +28,8 @@ from pru_math.store import Store  # noqa: E402
 def tmp_store(tmp_path: Path) -> Store:
     db = tmp_path / "pru.sqlite"
     return Store(db_path=db)
+
+
+@pytest.fixture()
+def tmp_graph(tmp_path: Path) -> RelationalGraph:
+    return RelationalGraph(path=tmp_path / "pru_graph.gpickle", autosave=False)
