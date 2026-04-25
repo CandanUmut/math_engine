@@ -1,21 +1,22 @@
-"""Phase 1 reasoner.
+"""Reasoner orchestrator.
 
-For Phase 1 the orchestration is deliberately simple:
+Phase 1 flow: parse → fingerprint → SymPy → verify → persist → emit trace.
 
-    parse → fingerprint → SymPy → verify → persist → emit trace
-
-Phase 2 inserts a graph-retrieval step before the tool call, Phase 3 adds
-a ranked multi-approach loop, Phase 4 adds alternate tools. The interface
-returned from :meth:`solve` is already shaped to carry a reasoning trace
-so those additions do not change the API.
+Phase 2 inserts a graph-retrieval step **before** the tool call. The
+neighbours are surfaced in the trace and in :class:`SolveOutcome`, but
+Phase 2 still always calls SymPy fresh — the graph informs but does not
+yet route. Phase 3 adds approach ranking; Phase 4 adds alternate tools.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
 from typing import Any
 
+from .config import CONFIG
 from .fingerprint import compute_fingerprint
+from .graph import RelationalGraph
 from .parser import ParseError, ParsedProblem, parse
+from .retrieval import SimilarProblem, find_similar_problems
 from .store import Store
 from .tools import sympy_tool
 from .tools.base import ToolResult
@@ -26,7 +27,7 @@ from .verifier import VerificationResult, verify
 class TraceStep:
     """A single step in the reasoning trace, surfaced to the UI."""
 
-    kind: str                       # "parse" | "fingerprint" | "tool_call" | "verify" | "persist"
+    kind: str   # "parse" | "fingerprint" | "retrieval" | "tool_call" | "verify" | "persist" | "graph_update"
     summary: str
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -47,6 +48,7 @@ class SolveOutcome:
     verification_status: str | None
     verification_detail: str | None
     error: str | None
+    similar: list[dict[str, Any]] = field(default_factory=list)
     trace: list[TraceStep] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -56,8 +58,10 @@ class SolveOutcome:
 
 
 class Reasoner:
-    def __init__(self, store: Store | None = None):
+    def __init__(self, store: Store | None = None,
+                 graph: RelationalGraph | None = None):
         self.store = store or Store()
+        self.graph = graph or RelationalGraph()
 
     # -------------------------------------------------------------------
 
@@ -104,7 +108,41 @@ class Reasoner:
             detail=fp,
         ))
 
-        # 3. Persist the problem (before tool call, so failures are also recorded)
+        # 3. Retrieval — query the graph for similar past problems BEFORE
+        #    we touch SymPy. Phase 2: surface only; Phase 3: rank approaches.
+        similar: list[SimilarProblem] = find_similar_problems(
+            fp, graph=self.graph, store=self.store, k=CONFIG.similar_top_k,
+        )
+        if similar:
+            top_summary = ", ".join(
+                f"#{s.problem.id} ({s.score:.2f})" for s in similar[:3]
+            )
+            trace.append(TraceStep(
+                kind="retrieval",
+                summary=f"Found {len(similar)} similar past problem(s): {top_summary}",
+                detail={
+                    "k": CONFIG.similar_top_k,
+                    "neighbours": [
+                        {
+                            "problem_id": s.problem.id,
+                            "score": round(s.score, 4),
+                            "problem_type": s.problem.problem_type,
+                            "parsed_pretty": s.problem.parsed_pretty,
+                            "best_approach": s.best_attempt.approach if s.best_attempt else None,
+                            "best_verification": s.best_attempt.verification_status if s.best_attempt else None,
+                        }
+                        for s in similar
+                    ],
+                },
+            ))
+        else:
+            trace.append(TraceStep(
+                kind="retrieval",
+                summary="No similar past problems yet — first of its kind in the graph.",
+                detail={"k": CONFIG.similar_top_k, "neighbours": []},
+            ))
+
+        # 4. Persist the problem (before tool call, so failures are also recorded)
         problem_id = self.store.insert_problem(
             raw_input=text,
             source_format=parsed.source_format,
@@ -114,7 +152,7 @@ class Reasoner:
             fingerprint=fp,
         )
 
-        # 4. Call SymPy
+        # 5. Call SymPy
         result: ToolResult = sympy_tool.solve(parsed)
         trace.append(TraceStep(
             kind="tool_call",
@@ -130,7 +168,7 @@ class Reasoner:
             },
         ))
 
-        # 5. Verify (only if the tool returned a candidate)
+        # 6. Verify (only if the tool returned a candidate)
         verification: VerificationResult | None = None
         if result.success:
             verification = verify(parsed, result.result)
@@ -140,7 +178,7 @@ class Reasoner:
                 detail={"status": verification.status, "detail": verification.detail},
             ))
 
-        # 6. Persist attempt + outcome aggregate
+        # 7. Persist attempt + outcome aggregate
         self.store.insert_attempt(
             problem_id=problem_id,
             tool=result.tool,
@@ -168,6 +206,43 @@ class Reasoner:
             detail={"problem_id": problem_id},
         ))
 
+        # 8. Graph update — add the problem node and similarity edges. We
+        #    reuse the candidate scores from the retrieval step so we don't
+        #    pay for the scan twice.
+        self.graph.add_problem(
+            problem_id=problem_id,
+            problem_type=parsed.problem_type,
+            signature=fp["signature"],
+            fingerprint=fp,
+            raw_input=text,
+            parsed_pretty=parsed.pretty(),
+        )
+        self.graph.link_solved_by(
+            problem_id=problem_id,
+            tool=result.tool,
+            approach=result.approach,
+            success=result.success,
+            verified=bool(verification and verification.status == "verified"),
+            time_ms=result.time_ms,
+        )
+        # Edges to neighbours we just retrieved
+        edges_added = self.graph.add_similarity_edges(
+            new_problem_id=problem_id,
+            candidates=[(s.problem.id, s.score) for s in similar],
+        )
+        self.graph.commit()
+        trace.append(TraceStep(
+            kind="graph_update",
+            summary=f"Graph: +1 problem node, +{edges_added} similarity edge(s) "
+                    f"(threshold {self.graph.threshold:.2f})",
+            detail={
+                "problem_node": f"p:{problem_id}",
+                "similarity_edges_added": edges_added,
+                "graph_nodes": self.graph.node_count(),
+                "graph_edges": self.graph.edge_count(),
+            },
+        ))
+
         return SolveOutcome(
             ok=result.success,
             problem_id=problem_id,
@@ -183,5 +258,6 @@ class Reasoner:
             verification_status=verification.status if verification else None,
             verification_detail=verification.detail if verification else None,
             error=result.error,
+            similar=[s.to_dict() for s in similar],
             trace=trace,
         )

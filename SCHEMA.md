@@ -109,7 +109,56 @@ All keys are stable across runs. The `signature` hash is computed from
 The weights are documented here so they're tunable transparently rather
 than hidden in code. Phase 2 consumes this score to rank neighbours.
 
-## Inspecting and editing the database
+## Relational graph (Phase 2)
+
+The graph is a NetworkX `MultiDiGraph` persisted to a single gpickle file
+at `PRU_GRAPH_PATH` (default `data/pru_graph.gpickle`). Every solve
+appends to the graph and atomically rewrites the file. If the file is
+corrupt at startup, it is renamed to `*.gpickle.corrupt` and a fresh
+graph is created — no silent data loss.
+
+### Node id scheme
+
+| prefix     | kind             | example                      |
+| ---------- | ---------------- | ---------------------------- |
+| `p:{id}`   | problem          | `p:42`                       |
+| `t:{name}` | tool             | `t:sympy`                    |
+| `pt:{name}`| problem type     | `pt:solve`                   |
+| `sig:{h}`  | signature cluster| `sig:a1b2c3d4e5f6a7b8`       |
+| `r:{name}` | rule / identity  | `r:pythagorean_identity` (Phase 4+) |
+
+### Edge kinds
+
+| kind            | from | to | attrs                                      |
+| --------------- | ---- | -- | ------------------------------------------ |
+| `solved_by`     | p    | t  | `approach`, `success`, `verified`, `time_ms` |
+| `has_type`      | p    | pt | —                                          |
+| `has_signature` | p    | sig| —                                          |
+| `similar_to`    | p    | p  | `weight ∈ [0, 1]` (stored both directions)  |
+| `uses_rule`     | p    | r  | reserved for later phases                  |
+
+`similar_to` edges are only stored when the similarity score is at or
+above `PRU_SIM_THRESHOLD` (default 0.55). Lowering the threshold makes
+the graph denser and recall higher; raising it makes queries faster.
+
+### Cytoscape JSON
+
+`GET /graph` and `GET /graph/around/{id}` emit the standard Cytoscape
+elements format (`{ "nodes": [...], "edges": [...] }`). Each node carries
+its `kind` and a short `label` plus the original problem fields when
+applicable, so the frontend can render and inspect without secondary
+fetches. Undirected `similar_to` edges are deduplicated on serialisation.
+
+### Sparse-matrix path
+
+For graphs above ~200 problem nodes, `pru_math.retrieval.find_similar_problems_sparse`
+projects fingerprints into a fixed feature vector (one-hot problem type +
+operator classes + function flags + normalised counts/degree) and
+computes cosine similarity in one BLAS-backed `scipy.sparse` multiplication.
+Below 200 nodes the simple Python scan is faster, and the sparse path
+falls back to it.
+
+## Inspecting and editing
 
 ```bash
 sqlite3 data/pru_math.sqlite
@@ -121,4 +170,6 @@ SELECT tool, approach, verification_status, time_ms FROM attempts ORDER BY id DE
 
 The store does no ORM-level validation on raw UPDATEs. If you hand-edit
 rows (e.g. to correct a mis-labelled problem), the next solve will pick
-the corrected labels up without further action.
+the corrected labels up without further action. The graph file is a plain
+pickle — open it in a Python REPL with `pickle.load(open(path,"rb"))`
+to inspect the `MultiDiGraph` directly.

@@ -17,13 +17,13 @@ See `PHILOSOPHY.md` for the longer version, and `SCHEMA.md` for the data model.
 
 ## Status
 
-This repo is **Phase 1** of a 5-phase plan. The later phases are not yet
+This repo is **Phase 2** of a 5-phase plan. The later phases are not yet
 implemented; the architecture was designed so adding them is additive.
 
 | Phase | Scope                                                   | State  |
 | ----- | ------------------------------------------------------- | ------ |
 | 1     | Skeleton · SymPy dispatch · verification · SQLite store | **done** |
-| 2     | Relational graph · similarity-based retrieval           | planned |
+| 2     | Relational graph · similarity-based retrieval           | **done** |
 | 3     | Learning · approach ranking · reasoning trace           | planned |
 | 4     | Multi-tool orchestration (numeric · Z3 · Wolfram)       | planned |
 | 5     | Hypothesis generation · identity discovery              | planned |
@@ -41,10 +41,22 @@ implemented; the architecture was designed so adding them is additive.
 - **Persist** the problem, the attempt, the fingerprint, and the verification status to SQLite.
 - Expose a FastAPI backend and a minimal dark-mode web UI that shows the answer, the reasoning trace, and the fingerprint.
 
-### What Phase 1 does **not** do yet
+### What Phase 2 adds
 
-- No graph retrieval — every problem is solved fresh.
-- No learning — approach selection is hardcoded by problem type.
+- A persistent **NetworkX MultiDiGraph** of typed nodes (problems, tools, problem-types, signature clusters, rules) and typed edges (`solved_by`, `has_type`, `has_signature`, `similar_to`, `uses_rule`). Atomic gpickle save on every solve; corrupt files are quarantined and a fresh graph is created.
+- A **retrieval** layer (`pru_math.retrieval`) that joins the graph (fingerprints) with the SQLite store (solutions and verification status) and returns the top-K most structurally similar past problems. A scipy-sparse path is included for graphs past ~200 nodes; below that, the simple Python scan is faster.
+- The reasoner now queries the graph **before** calling SymPy and surfaces the neighbours in the response and the trace. Per the Phase 2 spec, **decisions are not yet routed on the graph** — Phase 3 introduces that. Phase 2 just exposes the relations.
+- A four-tab UI:
+  - **Solve** — input, answer, similar-past-problems panel, full reasoning trace, fingerprint.
+  - **Graph** — interactive Cytoscape view of the relational graph; toggle similar / type / tool / signature edges; click any node or edge for details.
+  - **Database** — sortable, filterable raw inspectors for `problems`, `attempts`, and `tool_outcomes`. The "see the database" requirement.
+  - **Insights** — per-problem-type counts, per-tool/approach verify rates, per-source-format mix.
+- New endpoints: `GET /graph`, `GET /graph/around/{id}`, `GET /graph/stats`, `GET /problems/{id}/similar`, `GET /attempts`, `GET /tool_outcomes`, `GET /config`.
+
+### What Phase 2 does **not** do yet
+
+- No learning — approach selection is still hardcoded by problem type.
+  Tool outcomes are recorded but not yet consumed by a ranker.
 - No alternate tools — SymPy only.
 - No hypothesis generation.
 
@@ -77,49 +89,57 @@ translates language into a SymPy-parseable expression. See
 ## Architecture
 
 ```
-┌──────────────────────────────── GUI ────────────────────────────────┐
-│  /  (index.html)  — input, answer, trace, fingerprint, recent list  │
-└─────────────────────────────────┬───────────────────────────────────┘
-                                  │
-┌─────────────────────────────────▼───────────────────────────────────┐
-│                    pru_math.api (FastAPI)                           │
-│   POST /solve    GET /problems    GET /problems/{id}    /db/stats   │
-└─────────────────────────────────┬───────────────────────────────────┘
-                                  │
-┌─────────────────────────────────▼───────────────────────────────────┐
-│                      pru_math.reasoner (Phase 1)                    │
-│    parse → fingerprint → sympy_tool → verify → persist → trace      │
-└───────┬───────────────┬──────────────┬──────────────┬───────────────┘
-        │               │              │              │
- ┌──────▼──────┐ ┌──────▼──────┐ ┌─────▼─────┐ ┌──────▼──────┐
- │   parser    │ │ fingerprint │ │  tools/   │ │  verifier   │
- │sympy / latex│ │             │ │ sympy_tool│ │ numeric +   │
- │ / NL (ollama│ │             │ │           │ │ symbolic    │
- └─────────────┘ └─────────────┘ └───────────┘ └─────────────┘
-
-                              ┌──────────────┐
-                              │   SQLite     │
-                              │   problems   │
-                              │   attempts   │
-                              │ tool_outcomes│
-                              └──────────────┘
+┌─────────────────────────── GUI (4 tabs) ──────────────────────────────┐
+│  Solve · Graph (cytoscape) · Database · Insights                      │
+└──────────────────────────────────┬────────────────────────────────────┘
+                                   │
+┌──────────────────────────────────▼────────────────────────────────────┐
+│                          pru_math.api (FastAPI)                       │
+│   /solve   /problems   /problems/{id}/similar   /attempts             │
+│   /tool_outcomes   /graph   /graph/around/{id}   /graph/stats         │
+│   /db/stats   /config                                                 │
+└──────────────────────────────────┬────────────────────────────────────┘
+                                   │
+┌──────────────────────────────────▼────────────────────────────────────┐
+│                          pru_math.reasoner                            │
+│  parse → fingerprint → retrieval → sympy_tool → verify → persist →    │
+│  graph_update → trace                                                 │
+└──┬─────────┬──────────────┬──────────────┬──────────────┬─────────────┘
+   │         │              │              │              │
+ parser  fingerprint     retrieval      sympy_tool      verifier
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │  RelationalGraph       │
+                  │  (NetworkX MultiDiGraph│
+                  │   + atomic gpickle     │
+                  │   + scipy.sparse path) │
+                  └───────────┬────────────┘
+                              │
+                  ┌───────────▼───────────┐
+                  │       SQLite          │
+                  │  problems · attempts  │
+                  │   · tool_outcomes     │
+                  └───────────────────────┘
 ```
 
 ## Module map
 
 | File                                | Purpose |
 | ----------------------------------- | ------- |
-| `pru_math/config.py`                | env → `Config` dataclass |
+| `pru_math/config.py`                | env → `Config` dataclass (db / graph / ollama / similarity threshold / top-K) |
 | `pru_math/problem_types.py`         | canonical `SOLVE` / `INTEGRATE` / … tags |
 | `pru_math/parser.py`                | SymPy / LaTeX / NL → `ParsedProblem` |
 | `pru_math/fingerprint.py`           | structural fingerprint + similarity score (documented weights) |
 | `pru_math/tools/sympy_tool.py`      | dispatches parsed problem to the right `sympy.*` call |
 | `pru_math/verifier.py`              | per-type numerical / symbolic verification |
 | `pru_math/store.py`                 | plain `sqlite3` wrapper (no ORM — inspect with any SQLite browser) |
-| `pru_math/reasoner.py`              | Phase 1 orchestrator; emits a structured `SolveOutcome` + trace |
+| `pru_math/graph.py`                 | **Phase 2** — `RelationalGraph` (NetworkX) with persistence and cytoscape serialisation |
+| `pru_math/retrieval.py`             | **Phase 2** — `find_similar_problems`, plus a sparse-matrix path for large graphs |
+| `pru_math/reasoner.py`              | orchestrator; emits a structured `SolveOutcome` + trace |
 | `pru_math/api.py`                   | FastAPI app; mounts the frontend |
 | `pru_math/__main__.py`              | `python -m pru_math "..."` CLI |
-| `frontend/`                         | minimal static UI (no bundler in Phase 1) |
+| `frontend/`                         | static UI (no bundler — Cytoscape via CDN) |
 
 ## Tests
 
@@ -127,10 +147,16 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-47 tests covering the parser (three formats), fingerprint determinism and
+71 tests covering the parser (three formats), fingerprint determinism and
 similarity, SymPy tool dispatch for every supported problem type, the
 verifier against correct and wrong candidates, the SQLite store, the
-reasoner end-to-end, and the FastAPI layer via `TestClient`.
+graph (node/edge add, similarity edges, persistence round-trip,
+corruption recovery, cytoscape serialisation), retrieval (basic, exclude
+self, prefer-verified best-attempt, sparse-path fallback), the reasoner
+end-to-end (including "second similar problem finds the first"), and
+the FastAPI layer via `TestClient` (`/solve`, `/problems/{id}/similar`,
+`/graph`, `/graph/around/{id}`, `/graph/stats`, `/attempts`,
+`/tool_outcomes`, `/db/stats`).
 
 The NL parser is exercised via a mock so the suite doesn't need a running
 Ollama.

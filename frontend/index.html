@@ -5,25 +5,38 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PRU Math Engine</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <!-- cytoscape.js for the graph view (Phase 2) -->
+  <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <span class="brand-dot"></span>
       <span class="brand-name">PRU Math Engine</span>
-      <span class="brand-phase">phase 1 · sympy</span>
+      <span class="brand-phase" id="brand-phase">phase 2 · graph</span>
     </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="solve">Solve</button>
+      <button class="tab" data-tab="graph">Graph</button>
+      <button class="tab" data-tab="database">Database</button>
+      <button class="tab" data-tab="insights">Insights</button>
+    </nav>
     <div class="topbar-stats" id="stats">
       <span class="stat"><span class="stat-label">problems</span> <span id="stat-problems">–</span></span>
       <span class="stat"><span class="stat-label">attempts</span> <span id="stat-attempts">–</span></span>
       <span class="stat"><span class="stat-label">verified</span> <span id="stat-verified">–</span></span>
+      <span class="stat"><span class="stat-label">graph</span>
+        <span id="stat-nodes">–</span>n / <span id="stat-edges">–</span>e
+      </span>
     </div>
   </header>
 
-  <main class="grid">
+  <!-- ── Solve tab ──────────────────────────────────────────────────── -->
+  <main id="tab-solve" class="grid tabpanel active">
     <section class="card input-card">
       <h2>Solve</h2>
-      <p class="hint">Enter SymPy syntax, LaTeX, or a natural-language question.</p>
+      <p class="hint">Enter SymPy syntax, LaTeX, or a natural-language question.
+        <span class="subtle">⌘/Ctrl + Enter to submit.</span></p>
       <textarea id="input" rows="4" spellcheck="false"
         placeholder="e.g. solve x^2 - 5*x + 6 = 0
 e.g. \int_{0}^{1} x^2 dx
@@ -38,6 +51,12 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
       <h2>Answer</h2>
       <div class="answer" id="answer">—</div>
       <div class="answer-meta" id="answer-meta"></div>
+    </section>
+
+    <section class="card similar-card" id="similar-card" hidden>
+      <h2>Similar past problems</h2>
+      <p class="hint" id="similar-hint"></p>
+      <div id="similar"></div>
     </section>
 
     <section class="card trace-card" id="trace-card" hidden>
@@ -55,6 +74,66 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
       <div id="recent"></div>
     </section>
   </main>
+
+  <!-- ── Graph tab ──────────────────────────────────────────────────── -->
+  <section id="tab-graph" class="tabpanel">
+    <div class="graph-toolbar">
+      <h2>Relational graph</h2>
+      <div class="graph-controls">
+        <label><input type="checkbox" id="graph-show-similar" checked /> similar_to</label>
+        <label><input type="checkbox" id="graph-show-types" checked /> problem types</label>
+        <label><input type="checkbox" id="graph-show-tools" checked /> tools</label>
+        <label><input type="checkbox" id="graph-show-sigs" /> signatures</label>
+        <button id="graph-fit">fit</button>
+        <button id="graph-refresh">refresh</button>
+      </div>
+    </div>
+    <div class="graph-legend">
+      <span class="legend-dot" style="background:#7c9cff"></span> problem
+      <span class="legend-dot" style="background:#7cf0c2"></span> tool
+      <span class="legend-dot" style="background:#ffb078"></span> problem type
+      <span class="legend-dot" style="background:#b78cff"></span> signature
+      <span class="legend-dot" style="background:#ff8591"></span> rule
+    </div>
+    <div id="cy"></div>
+    <div class="graph-detail" id="graph-detail">
+      <span class="subtle">Click a node to see details.</span>
+    </div>
+  </section>
+
+  <!-- ── Database tab ──────────────────────────────────────────────── -->
+  <section id="tab-database" class="tabpanel">
+    <div class="db-toolbar">
+      <h2>Database inspector</h2>
+      <div class="db-tabs">
+        <button class="db-tab active" data-db="problems">problems</button>
+        <button class="db-tab" data-db="attempts">attempts</button>
+        <button class="db-tab" data-db="tool_outcomes">tool_outcomes</button>
+      </div>
+      <input id="db-filter" type="text" placeholder="filter…" />
+    </div>
+    <div id="db-table" class="db-table"></div>
+  </section>
+
+  <!-- ── Insights tab ──────────────────────────────────────────────── -->
+  <section id="tab-insights" class="tabpanel">
+    <div class="insights-grid">
+      <div class="card">
+        <h2>Tool outcomes</h2>
+        <p class="hint">Phase 3 will use these stats to rank approaches.
+          For now, this is a window into how the engine has been performing.</p>
+        <div id="insights-tools"></div>
+      </div>
+      <div class="card">
+        <h2>By problem type</h2>
+        <div id="insights-types"></div>
+      </div>
+      <div class="card">
+        <h2>By source format</h2>
+        <div id="insights-sources"></div>
+      </div>
+    </div>
+  </section>
 
   <script src="/static/app.js"></script>
 </body>
