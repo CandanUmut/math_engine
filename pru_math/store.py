@@ -1,14 +1,14 @@
 """SQLite storage layer.
 
-Three tables for Phase 1:
+Tables:
 
 - ``problems``       — one row per solve request
 - ``attempts``       — one row per tool invocation on a problem
-- ``tool_outcomes``  — aggregated (fingerprint_signature, tool, approach) stats
+- ``tool_outcomes``  — aggregated (signature, tool, approach) stats including
+                       a small bag of recent failure modes (Phase 3)
 
 The store is intentionally plain ``sqlite3`` — no ORM — so the schema stays
-trivially inspectable with any SQLite browser. Phase 2 will add graph
-tables; Phase 5 will add hypotheses.
+trivially inspectable with any SQLite browser. Phase 5 will add hypotheses.
 """
 from __future__ import annotations
 
@@ -60,17 +60,30 @@ CREATE INDEX IF NOT EXISTS idx_attempts_problem ON attempts(problem_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_tool ON attempts(tool, approach);
 
 CREATE TABLE IF NOT EXISTS tool_outcomes (
-    signature      TEXT    NOT NULL,
-    tool           TEXT    NOT NULL,
-    approach       TEXT    NOT NULL,
-    n_attempts     INTEGER NOT NULL DEFAULT 0,
-    n_success      INTEGER NOT NULL DEFAULT 0,
-    n_verified     INTEGER NOT NULL DEFAULT 0,
-    total_time_ms  REAL    NOT NULL DEFAULT 0,
-    updated_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    signature           TEXT    NOT NULL,
+    tool                TEXT    NOT NULL,
+    approach            TEXT    NOT NULL,
+    n_attempts          INTEGER NOT NULL DEFAULT 0,
+    n_success           INTEGER NOT NULL DEFAULT 0,
+    n_verified          INTEGER NOT NULL DEFAULT 0,
+    total_time_ms       REAL    NOT NULL DEFAULT 0,
+    failure_modes_json  TEXT    NOT NULL DEFAULT '[]',
+    updated_at          TEXT    NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (signature, tool, approach)
 );
+
+CREATE INDEX IF NOT EXISTS idx_outcomes_tool_approach ON tool_outcomes(tool, approach);
 """
+
+# Columns added after the initial schema. Each entry is a (table, column,
+# DDL fragment) tuple; ``_init_schema`` issues ALTER TABLE for any column
+# that is missing on existing databases.
+_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("tool_outcomes", "failure_modes_json", "TEXT NOT NULL DEFAULT '[]'"),
+]
+
+
+_MAX_FAILURE_MODES = 8     # cap the per-(sig, approach) failure mode list
 
 
 @dataclass
@@ -84,6 +97,31 @@ class ProblemRecord:
     fingerprint: dict[str, Any]
     signature: str
     created_at: str
+
+
+@dataclass
+class ToolOutcomeRecord:
+    signature: str
+    tool: str
+    approach: str
+    n_attempts: int
+    n_success: int
+    n_verified: int
+    total_time_ms: float
+    failure_modes: list[str]
+    updated_at: str
+
+    @property
+    def avg_time_ms(self) -> float:
+        return self.total_time_ms / self.n_attempts if self.n_attempts else 0.0
+
+    @property
+    def verify_rate(self) -> float:
+        return self.n_verified / self.n_attempts if self.n_attempts else 0.0
+
+    @property
+    def success_rate(self) -> float:
+        return self.n_success / self.n_attempts if self.n_attempts else 0.0
 
 
 @dataclass
@@ -119,6 +157,11 @@ class Store:
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.executescript(SCHEMA)
+            for table, col, ddl in _MIGRATIONS:
+                cur = self._conn.execute(f"PRAGMA table_info({table})")
+                existing = {row[1] for row in cur.fetchall()}
+                if col not in existing:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
     @contextmanager
     def _cursor(self) -> Iterator[sqlite3.Cursor]:
@@ -206,25 +249,55 @@ class Store:
         success: bool,
         verified: bool,
         time_ms: float,
+        error: str | None = None,
     ) -> None:
+        """Insert or update the (signature, tool, approach) aggregate.
+
+        When ``error`` is provided (i.e. the attempt failed or was refuted),
+        a short tag — ``ExceptionClass`` for tool errors, or
+        ``verify:refuted``/``verify:inconclusive`` — is appended to the
+        ``failure_modes_json`` list, capped at ``_MAX_FAILURE_MODES`` most-
+        recent entries. The list is never re-ordered; the oldest entry is
+        evicted when full.
+        """
+        # We need a read-modify-write for failure_modes_json, and we want the
+        # whole upsert to be atomic, so do it in one cursor.
         with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT failure_modes_json FROM tool_outcomes "
+                "WHERE signature = ? AND tool = ? AND approach = ?",
+                (signature, tool, approach),
+            ).fetchone()
+            existing: list[str] = []
+            if row and row["failure_modes_json"]:
+                try:
+                    existing = list(json.loads(row["failure_modes_json"]))
+                except (TypeError, ValueError):
+                    existing = []
+            if error:
+                existing.append(error)
+                if len(existing) > _MAX_FAILURE_MODES:
+                    existing = existing[-_MAX_FAILURE_MODES:]
             cur.execute(
                 """
                 INSERT INTO tool_outcomes
-                    (signature, tool, approach, n_attempts, n_success, n_verified, total_time_ms, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?, ?, datetime('now'))
+                    (signature, tool, approach, n_attempts, n_success, n_verified,
+                     total_time_ms, failure_modes_json, updated_at)
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(signature, tool, approach) DO UPDATE SET
-                    n_attempts    = n_attempts    + 1,
-                    n_success     = n_success     + excluded.n_success,
-                    n_verified    = n_verified    + excluded.n_verified,
-                    total_time_ms = total_time_ms + excluded.total_time_ms,
-                    updated_at    = datetime('now')
+                    n_attempts         = n_attempts    + 1,
+                    n_success          = n_success     + excluded.n_success,
+                    n_verified         = n_verified    + excluded.n_verified,
+                    total_time_ms      = total_time_ms + excluded.total_time_ms,
+                    failure_modes_json = excluded.failure_modes_json,
+                    updated_at         = datetime('now')
                 """,
                 (
                     signature, tool, approach,
                     1 if success else 0,
                     1 if verified else 0,
                     float(time_ms),
+                    json.dumps(existing),
                 ),
             )
 
@@ -280,6 +353,82 @@ class Store:
                 (int(problem_id),),
             ).fetchall()
             return [self._row_to_attempt(r) for r in rows]
+
+    def _row_to_outcome(self, row: sqlite3.Row) -> ToolOutcomeRecord:
+        try:
+            modes = list(json.loads(row["failure_modes_json"] or "[]"))
+        except (TypeError, ValueError):
+            modes = []
+        return ToolOutcomeRecord(
+            signature=row["signature"],
+            tool=row["tool"],
+            approach=row["approach"],
+            n_attempts=int(row["n_attempts"]),
+            n_success=int(row["n_success"]),
+            n_verified=int(row["n_verified"]),
+            total_time_ms=float(row["total_time_ms"]),
+            failure_modes=modes,
+            updated_at=row["updated_at"],
+        )
+
+    def get_tool_outcomes_by_signature(self, signature: str) -> list[ToolOutcomeRecord]:
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT * FROM tool_outcomes WHERE signature = ?", (signature,),
+            ).fetchall()
+        return [self._row_to_outcome(r) for r in rows]
+
+    def get_tool_outcomes_by_problem_type(self, problem_type: str
+                                          ) -> list[ToolOutcomeRecord]:
+        """Aggregate outcomes across all signatures of a given problem type
+        by joining on ``problems.signature``. The returned records have
+        ``signature`` set to the empty string and represent type-level
+        totals — used as a fallback when the current signature is unseen."""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT
+                    '' AS signature,
+                    o.tool, o.approach,
+                    SUM(o.n_attempts)     AS n_attempts,
+                    SUM(o.n_success)      AS n_success,
+                    SUM(o.n_verified)     AS n_verified,
+                    SUM(o.total_time_ms)  AS total_time_ms,
+                    '[]'                  AS failure_modes_json,
+                    MAX(o.updated_at)     AS updated_at
+                FROM tool_outcomes o
+                JOIN problems p ON p.signature = o.signature
+                WHERE p.problem_type = ?
+                GROUP BY o.tool, o.approach
+                """,
+                (problem_type,),
+            ).fetchall()
+        return [self._row_to_outcome(r) for r in rows]
+
+    def list_tool_outcomes(self, limit: int = 200) -> list[ToolOutcomeRecord]:
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT * FROM tool_outcomes ORDER BY n_attempts DESC, updated_at DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [self._row_to_outcome(r) for r in rows]
+
+    def attempt_timeline(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Recent attempts as plain dicts, suitable for charts / dashboards."""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT a.id, a.problem_id, a.tool, a.approach, a.success,
+                       a.verification_status, a.time_ms, a.created_at,
+                       p.problem_type
+                FROM attempts a
+                JOIN problems p ON p.id = a.problem_id
+                ORDER BY a.id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def stats(self) -> dict[str, Any]:
         with self._cursor() as cur:
