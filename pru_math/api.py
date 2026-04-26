@@ -1,4 +1,4 @@
-"""FastAPI layer exposing the Phase 1+2 reasoner.
+"""FastAPI layer exposing the Phase 1+2+3 reasoner.
 
 Endpoints
 ---------
@@ -7,27 +7,32 @@ Endpoints
 - ``GET  /problems/{id}``                  — one problem + its attempts
 - ``GET  /problems/{id}/similar?k=5``      — K most similar past problems
 - ``GET  /attempts``                       — list attempts (recent first)
+- ``GET  /attempts/timeline``              — recent attempts joined to problems (for charts)
 - ``GET  /tool_outcomes``                  — aggregated tool stats
+- ``GET  /learner/rank``                   — preview the learner's rank for a (sig, type)
 - ``GET  /graph``                          — full graph as cytoscape JSON
 - ``GET  /graph/around/{id}?radius=1``     — subgraph around a problem
 - ``GET  /graph/stats``                    — node/edge counts by kind
 - ``GET  /db/stats``                       — store stats
+- ``GET  /config``                         — runtime configuration snapshot
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import CONFIG
 from .graph import RelationalGraph
+from .learner import Learner
 from .reasoner import Reasoner
 from .retrieval import find_similar_problems
 from .store import Store
+from .tools import sympy_tool
 
 
 class SolveRequest(BaseModel):
@@ -67,12 +72,14 @@ def _problem_to_dict(p) -> dict[str, Any]:
 
 
 def create_app(store: Store | None = None,
-               graph: RelationalGraph | None = None) -> FastAPI:
+               graph: RelationalGraph | None = None,
+               learner: Learner | None = None) -> FastAPI:
     store = store or Store()
     graph = graph or RelationalGraph()
-    reasoner = Reasoner(store=store, graph=graph)
+    learner = learner or Learner(store)
+    reasoner = Reasoner(store=store, graph=graph, learner=learner)
 
-    app = FastAPI(title="PRU Math Engine", version="0.2.0")
+    app = FastAPI(title="PRU Math Engine", version="0.3.0")
 
     # --- Solve / problems ----------------------------------------------------
 
@@ -129,33 +136,51 @@ def create_app(store: Store | None = None,
 
     @app.get("/tool_outcomes")
     def list_tool_outcomes(limit: int = 200) -> dict[str, Any]:
-        with store._cursor() as cur:  # noqa: SLF001
-            rows = cur.execute(
-                """
-                SELECT signature, tool, approach, n_attempts, n_success,
-                       n_verified, total_time_ms, updated_at
-                FROM tool_outcomes
-                ORDER BY n_attempts DESC, updated_at DESC
-                LIMIT ?
-                """,
-                (int(limit),),
-            ).fetchall()
-        out = []
-        for r in rows:
-            n = max(int(r["n_attempts"]), 1)
-            out.append({
-                "signature": r["signature"],
-                "tool": r["tool"],
-                "approach": r["approach"],
-                "n_attempts": int(r["n_attempts"]),
-                "n_success": int(r["n_success"]),
-                "n_verified": int(r["n_verified"]),
-                "success_rate": int(r["n_success"]) / n,
-                "verify_rate": int(r["n_verified"]) / n,
-                "avg_time_ms": float(r["total_time_ms"]) / n,
-                "updated_at": r["updated_at"],
-            })
-        return {"items": out, "limit": limit}
+        records = store.list_tool_outcomes(limit=limit)
+        return {
+            "items": [
+                {
+                    "signature": r.signature,
+                    "tool": r.tool,
+                    "approach": r.approach,
+                    "n_attempts": r.n_attempts,
+                    "n_success": r.n_success,
+                    "n_verified": r.n_verified,
+                    "success_rate": r.success_rate,
+                    "verify_rate": r.verify_rate,
+                    "avg_time_ms": r.avg_time_ms,
+                    "failure_modes": r.failure_modes,
+                    "updated_at": r.updated_at,
+                }
+                for r in records
+            ],
+            "limit": limit,
+        }
+
+    @app.get("/attempts/timeline")
+    def attempts_timeline(limit: int = 500) -> dict[str, Any]:
+        return {"items": store.attempt_timeline(limit=limit), "limit": limit}
+
+    # --- Learner (Phase 3) --------------------------------------------------
+
+    @app.get("/learner/rank")
+    def learner_rank(
+        problem_type: str = Query(..., description="Problem type to look up approaches for"),
+        signature: str = Query("", description="Optional fingerprint signature; empty = type-level only"),
+    ) -> dict[str, Any]:
+        candidates = [
+            (sympy_tool.TOOL_NAME, name)
+            for name in sympy_tool.candidate_approaches(problem_type)
+        ]
+        ranked = learner.rank(
+            signature=signature, problem_type=problem_type, candidates=candidates,
+        )
+        return {
+            "problem_type": problem_type,
+            "signature": signature,
+            "exploration_c": learner.exploration_c,
+            "candidates": [c.to_dict() for c in ranked],
+        }
 
     # --- Graph ---------------------------------------------------------------
 
@@ -190,6 +215,8 @@ def create_app(store: Store | None = None,
             "similarity_threshold": CONFIG.similarity_threshold,
             "similar_top_k": CONFIG.similar_top_k,
             "tool_timeout_s": CONFIG.tool_timeout_s,
+            "max_attempts": CONFIG.max_attempts,
+            "learner_exploration": CONFIG.learner_exploration,
         }
 
     # --- Frontend (static UI) -----------------------------------------------

@@ -113,6 +113,8 @@ main.grid {
 .input-card { grid-column: 1 / -1; }
 .recent-card { grid-column: 1 / -1; }
 .similar-card { grid-column: 1 / -1; }
+.attempts-card { grid-column: 1 / -1; }
+.trace-card { grid-column: 1 / -1; }
 
 .hint { color: var(--muted); margin: 0 0 10px; font-size: 12.5px; }
 
@@ -176,22 +178,107 @@ button.subtle-btn:hover { color: var(--text); transform: none; box-shadow: none;
 .tag.bad  { color: var(--bad);  border-color: rgba(255,133,145,0.4); }
 .tag.warn { color: var(--warn); border-color: rgba(255,176,120,0.4); }
 
-.trace { margin: 0; padding-left: 18px; }
-.trace li { margin-bottom: 10px; }
+.trace-header { display: flex; align-items: center; justify-content: space-between; }
+.trace-header h2 { margin: 0; }
+.trace-controls { display: flex; gap: 6px; }
+
+.trace { margin: 12px 0 0; padding-left: 18px; list-style: none; counter-reset: tracestep; }
+.trace li {
+  margin-bottom: 8px;
+  position: relative; padding-left: 8px;
+  counter-increment: tracestep;
+}
+.trace li::before {
+  content: counter(tracestep);
+  position: absolute; left: -24px; top: 0;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: rgba(255,255,255,0.06);
+  color: var(--muted);
+  font-size: 10px; font-family: var(--mono);
+  display: flex; align-items: center; justify-content: center;
+}
 .trace .kind {
   display: inline-block; font-size: 10px; text-transform: uppercase;
   letter-spacing: 0.12em; color: var(--muted);
   border: 1px solid var(--panel-border);
   padding: 1px 6px; border-radius: 999px; margin-right: 8px;
 }
+.trace .kind.k-decision    { color: var(--accent);    border-color: rgba(124,156,255,0.4); }
+.trace .kind.k-tool_call   { color: var(--accent-2);  border-color: rgba(124,240,194,0.4); }
+.trace .kind.k-verify      { color: var(--good);      border-color: rgba(124,240,194,0.4); }
+.trace .kind.k-learn       { color: var(--warn);      border-color: rgba(255,176,120,0.4); }
+.trace .kind.k-graph_update{ color: var(--signature); border-color: rgba(183,140,255,0.4); }
 .trace .summary { font-size: 13.5px; }
+
+.trace details { margin-top: 4px; }
+.trace details > summary {
+  cursor: pointer; color: var(--muted); font-size: 12px;
+  list-style: none; user-select: none;
+}
+.trace details > summary::before {
+  content: "▸"; display: inline-block; margin-right: 6px;
+  transition: transform 100ms ease;
+}
+.trace details[open] > summary::before { transform: rotate(90deg); }
+
 .trace .detail  {
   color: var(--muted); font-family: var(--mono); font-size: 12px;
-  margin-top: 4px; white-space: pre-wrap;
+  margin-top: 6px; white-space: pre-wrap;
   background: rgba(0,0,0,0.18);
   padding: 8px 10px; border-radius: 8px;
   border: 1px solid var(--panel-border);
 }
+
+/* Candidate table inside a "decision" trace step */
+.candidate-table {
+  margin-top: 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.candidate-table table { width: 100%; border-collapse: collapse; }
+.candidate-table th, .candidate-table td {
+  text-align: left; padding: 6px 10px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.candidate-table th {
+  background: var(--panel-strong); color: var(--muted);
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  font-weight: 500;
+}
+.candidate-table tr:last-child td { border-bottom: none; }
+.candidate-table tr.chosen td { background: rgba(124,240,194,0.08); }
+.candidate-table .approach { color: var(--text); }
+.candidate-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.candidate-table .bar {
+  display: inline-block; width: 60px; height: 6px; vertical-align: middle;
+  background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden;
+  margin-right: 6px;
+}
+.candidate-table .bar > span {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+/* Attempt rows inside the Solve tab */
+.attempt-row {
+  display: grid;
+  grid-template-columns: 24px 1fr 100px 120px 80px;
+  gap: 10px; padding: 8px 10px;
+  border-top: 1px solid var(--panel-border);
+  font-size: 13px; align-items: baseline;
+}
+.attempt-row:first-child { border-top: none; }
+.attempt-row .idx { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.attempt-row .approach { font-family: var(--mono); }
+.attempt-row .result {
+  font-family: var(--mono); color: var(--muted); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.attempt-row.chosen { background: rgba(124,240,194,0.06); }
+.mono-inline { font-family: var(--mono); }
 
 pre {
   background: rgba(0,0,0,0.32);
@@ -350,9 +437,15 @@ pre {
 }
 .insights-grid {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 16px;
 }
+.insights-grid .insights-wide { grid-column: span 3; }
+@media (max-width: 1100px) {
+  .insights-grid { grid-template-columns: 1fr 1fr; }
+  .insights-grid .insights-wide { grid-column: span 2; }
+}
+.insights-grid canvas { width: 100% !important; max-height: 240px; }
 .bar-row {
   display: grid;
   grid-template-columns: 200px 1fr 60px;

@@ -7,13 +7,15 @@
   <link rel="stylesheet" href="/static/style.css" />
   <!-- cytoscape.js for the graph view (Phase 2) -->
   <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+  <!-- chart.js for the learning dashboard (Phase 3) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <span class="brand-dot"></span>
       <span class="brand-name">PRU Math Engine</span>
-      <span class="brand-phase" id="brand-phase">phase 2 · graph</span>
+      <span class="brand-phase" id="brand-phase">phase 3 · learning</span>
     </div>
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="solve">Solve</button>
@@ -59,8 +61,20 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
       <div id="similar"></div>
     </section>
 
+    <section class="card attempts-card" id="attempts-card" hidden>
+      <h2>Attempts</h2>
+      <p class="hint" id="attempts-hint"></p>
+      <div id="attempts"></div>
+    </section>
+
     <section class="card trace-card" id="trace-card" hidden>
-      <h2>Reasoning trace</h2>
+      <div class="trace-header">
+        <h2>Reasoning trace</h2>
+        <div class="trace-controls">
+          <button id="trace-expand" class="subtle-btn">expand all</button>
+          <button id="trace-collapse" class="subtle-btn">collapse</button>
+        </div>
+      </div>
       <ol class="trace" id="trace"></ol>
     </section>
 
@@ -118,10 +132,28 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
   <!-- ── Insights tab ──────────────────────────────────────────────── -->
   <section id="tab-insights" class="tabpanel">
     <div class="insights-grid">
+      <div class="card insights-wide">
+        <h2>Verify rate over time</h2>
+        <p class="hint">Rolling 20-attempt verification rate. The line trending
+          upward is the learner working — the system is getting better at
+          picking the right approach first.</p>
+        <canvas id="chart-verify-time" height="180"></canvas>
+      </div>
       <div class="card">
-        <h2>Tool outcomes</h2>
-        <p class="hint">Phase 3 will use these stats to rank approaches.
-          For now, this is a window into how the engine has been performing.</p>
+        <h2>Average attempts per problem</h2>
+        <p class="hint">When the learner improves, it picks a verifying
+          approach earlier and the average drops toward 1.</p>
+        <canvas id="chart-attempts-per-problem" height="180"></canvas>
+      </div>
+      <div class="card">
+        <h2>Average solve time by problem type</h2>
+        <canvas id="chart-time-by-type" height="180"></canvas>
+      </div>
+      <div class="card insights-wide">
+        <h2>Approach verify rate (per signature class)</h2>
+        <p class="hint">Each bar is one
+          <span class="mono-inline">(signature, approach)</span> pair. Bars with
+          tabular n &lt; 3 are exploratory.</p>
         <div id="insights-tools"></div>
       </div>
       <div class="card">

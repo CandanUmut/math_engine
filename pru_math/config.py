@@ -30,6 +30,8 @@ class Config:
     tool_timeout_s: float
     similarity_threshold: float
     similar_top_k: int
+    max_attempts: int
+    learner_exploration: float
 
 
 def load_config() -> Config:
@@ -42,6 +44,8 @@ def load_config() -> Config:
         tool_timeout_s=float(os.getenv("PRU_TOOL_TIMEOUT_S", "20")),
         similarity_threshold=float(os.getenv("PRU_SIM_THRESHOLD", "0.55")),
         similar_top_k=int(os.getenv("PRU_SIMILAR_TOP_K", "5")),
+        max_attempts=int(os.getenv("PRU_MAX_ATTEMPTS", "3")),
+        learner_exploration=float(os.getenv("PRU_LEARNER_EXPLORATION", "1.0")),
     )
 
 
