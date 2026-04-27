@@ -29,10 +29,11 @@ from pydantic import BaseModel, Field
 
 from .config import CONFIG
 from .graph import RelationalGraph
+from .hypothesizer import Hypothesizer
 from .learner import Learner
 from .reasoner import Reasoner
 from .retrieval import find_similar_problems
-from .store import Store
+from .store import HypothesisRecord, Store
 from .tools import sympy_tool
 from .tools.registry import ToolRegistry, default_registry
 
@@ -77,17 +78,30 @@ def _problem_to_dict(p) -> dict[str, Any]:
     }
 
 
+def _hypothesis_to_dict(h: HypothesisRecord) -> dict[str, Any]:
+    return {
+        "id": h.id, "kind": h.kind, "claim": h.claim,
+        "claim_repr": h.claim_repr, "fingerprint": h.fingerprint,
+        "evidence": h.evidence, "status": h.status, "method": h.method,
+        "verification_detail": h.verification_detail,
+        "rule_node": h.rule_node,
+        "created_at": h.created_at, "updated_at": h.updated_at,
+    }
+
+
 def create_app(store: Store | None = None,
                graph: RelationalGraph | None = None,
                learner: Learner | None = None,
-               registry: ToolRegistry | None = None) -> FastAPI:
+               registry: ToolRegistry | None = None,
+               hypothesizer: Hypothesizer | None = None) -> FastAPI:
     store = store or Store()
     graph = graph or RelationalGraph()
     learner = learner or Learner(store)
     registry = registry or default_registry()
+    hypothesizer = hypothesizer or Hypothesizer(store=store, graph=graph)
     reasoner = Reasoner(store=store, graph=graph, learner=learner, registry=registry)
 
-    app = FastAPI(title="PRU Math Engine", version="0.4.0")
+    app = FastAPI(title="PRU Math Engine", version="0.5.0")
 
     # --- Solve / problems ----------------------------------------------------
 
@@ -213,7 +227,50 @@ def create_app(store: Store | None = None,
     def stats() -> dict[str, Any]:
         s = store.stats()
         s["graph"] = graph.stats()
+        s["hypotheses"] = store.hypothesis_counts()
         return s
+
+    # --- Hypotheses (Phase 5) ----------------------------------------------
+
+    @app.get("/hypotheses")
+    def list_hypotheses(
+        status: str | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        items = store.list_hypotheses(status=status, kind=kind, limit=limit)
+        return {
+            "items": [_hypothesis_to_dict(h) for h in items],
+            "counts": store.hypothesis_counts(),
+            "limit": limit,
+        }
+
+    @app.get("/hypotheses/{hypothesis_id}")
+    def get_hypothesis(hypothesis_id: int) -> dict[str, Any]:
+        rec = store.get_hypothesis(hypothesis_id)
+        if not rec:
+            raise HTTPException(404, f"no hypothesis with id={hypothesis_id}")
+        return _hypothesis_to_dict(rec)
+
+    @app.post("/hypotheses/scan")
+    def scan_hypotheses(verify: bool = True) -> dict[str, Any]:
+        results = hypothesizer.scan(verify=verify)
+        return {
+            "scanned": len(results),
+            "items": [r.to_dict() for r in results],
+            "counts": store.hypothesis_counts(),
+        }
+
+    @app.post("/hypotheses/{hypothesis_id}/verify")
+    def reverify_hypothesis(hypothesis_id: int) -> dict[str, Any]:
+        rec = store.get_hypothesis(hypothesis_id)
+        if not rec:
+            raise HTTPException(404, f"no hypothesis with id={hypothesis_id}")
+        from .hypothesizer import record_to_hypothesis
+        h = record_to_hypothesis(rec)
+        hypothesizer.verify(h)
+        out = store.get_hypothesis(hypothesis_id)
+        return _hypothesis_to_dict(out)  # type: ignore[arg-type]
 
     @app.get("/config")
     def config() -> dict[str, Any]:

@@ -22,6 +22,9 @@
       <button class="tab" data-tab="graph">Graph</button>
       <button class="tab" data-tab="database">Database</button>
       <button class="tab" data-tab="insights">Insights</button>
+      <button class="tab" data-tab="hypotheses">Hypotheses
+        <span class="tab-badge" id="tab-badge-hypotheses" hidden>0</span>
+      </button>
     </nav>
     <div class="topbar-stats" id="stats">
       <span class="stat"><span class="stat-label">problems</span> <span id="stat-problems">–</span></span>
@@ -167,6 +170,34 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
         <div id="insights-sources"></div>
       </div>
     </div>
+  </section>
+
+  <!-- ── Hypotheses tab (Phase 5) ───────────────────────────────────── -->
+  <section id="tab-hypotheses" class="tabpanel">
+    <div class="hyp-toolbar">
+      <h2>Hypotheses</h2>
+      <p class="hint">Proposed by the engine from patterns in the graph,
+        verified (or refuted) by SymPy / numeric sampling / Z3. Verified
+        ones become rule nodes you can see on the Graph tab.</p>
+      <div class="hyp-controls">
+        <select id="hyp-filter-status">
+          <option value="">all status</option>
+          <option value="proposed">proposed</option>
+          <option value="verified">verified</option>
+          <option value="refuted">refuted</option>
+          <option value="inconclusive">inconclusive</option>
+        </select>
+        <select id="hyp-filter-kind">
+          <option value="">all kinds</option>
+          <option value="identity">identity</option>
+          <option value="specialization">specialization</option>
+          <option value="recurring_approach">recurring_approach</option>
+        </select>
+        <button id="hyp-scan">scan now</button>
+        <button id="hyp-refresh" class="subtle-btn">refresh</button>
+      </div>
+    </div>
+    <div id="hyp-list" class="hyp-list"></div>
   </section>
 
   <script src="/static/app.js"></script>

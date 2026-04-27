@@ -73,6 +73,27 @@ CREATE TABLE IF NOT EXISTS tool_outcomes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outcomes_tool_approach ON tool_outcomes(tool, approach);
+
+-- Phase 5: hypotheses are proposed by the hypothesizer, verified (or
+-- refuted) by the verification pipeline, and the surviving ones are
+-- materialised as rule nodes in the graph.
+CREATE TABLE IF NOT EXISTS hypotheses (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind                TEXT    NOT NULL,        -- "identity" | "specialization" | "recurring_approach"
+    claim               TEXT    NOT NULL,        -- short human-readable
+    claim_repr          TEXT,                    -- machine-checkable form (e.g. "lhs == rhs" srepr)
+    fingerprint         TEXT    NOT NULL UNIQUE, -- dedupe key (sha1 of kind+claim_repr)
+    evidence_json       TEXT    NOT NULL DEFAULT '{}',
+    status              TEXT    NOT NULL,        -- "proposed" | "verified" | "refuted" | "inconclusive"
+    method              TEXT,                    -- "sympy" | "numeric" | "z3" | "stat" | NULL
+    verification_detail TEXT,
+    rule_node           TEXT,                    -- graph node id for verified hypotheses
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_hypotheses_status ON hypotheses(status);
+CREATE INDEX IF NOT EXISTS idx_hypotheses_kind ON hypotheses(kind);
 """
 
 # Columns added after the initial schema. Each entry is a (table, column,
@@ -88,6 +109,28 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
 
 
 _MAX_FAILURE_MODES = 8     # cap the per-(sig, approach) failure mode list
+
+
+def _merge_evidence(prior: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Merge two evidence dicts: lists deduplicate (preserving order),
+    integers add, scalars from ``new`` win."""
+    out = dict(prior)
+    for k, v in new.items():
+        if isinstance(v, list) and isinstance(out.get(k), list):
+            seen = set()
+            merged: list[Any] = []
+            for item in list(out[k]) + v:
+                key = json.dumps(item, sort_keys=True) if isinstance(item, (dict, list)) else item
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+            out[k] = merged
+        elif isinstance(v, int) and isinstance(out.get(k), int):
+            out[k] = out[k] + v
+        else:
+            out[k] = v
+    return out
 
 
 @dataclass
@@ -126,6 +169,22 @@ class ToolOutcomeRecord:
     @property
     def success_rate(self) -> float:
         return self.n_success / self.n_attempts if self.n_attempts else 0.0
+
+
+@dataclass
+class HypothesisRecord:
+    id: int
+    kind: str
+    claim: str
+    claim_repr: str | None
+    fingerprint: str
+    evidence: dict[str, Any]
+    status: str
+    method: str | None
+    verification_detail: str | None
+    rule_node: str | None
+    created_at: str
+    updated_at: str
 
 
 @dataclass
@@ -449,6 +508,135 @@ class Store:
                 (int(limit),),
             ).fetchall()
         return [self._row_to_outcome(r) for r in rows]
+
+    # --- Hypotheses (Phase 5) -----------------------------------------
+
+    def _row_to_hypothesis(self, row: sqlite3.Row) -> HypothesisRecord:
+        try:
+            ev = dict(json.loads(row["evidence_json"] or "{}"))
+        except (TypeError, ValueError):
+            ev = {}
+        return HypothesisRecord(
+            id=row["id"],
+            kind=row["kind"],
+            claim=row["claim"],
+            claim_repr=row["claim_repr"],
+            fingerprint=row["fingerprint"],
+            evidence=ev,
+            status=row["status"],
+            method=row["method"],
+            verification_detail=row["verification_detail"],
+            rule_node=row["rule_node"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def upsert_hypothesis(
+        self,
+        *,
+        kind: str,
+        claim: str,
+        claim_repr: str | None,
+        fingerprint: str,
+        evidence: dict[str, Any],
+        status: str = "proposed",
+        method: str | None = None,
+        verification_detail: str | None = None,
+    ) -> tuple[int, bool]:
+        """Insert a new hypothesis or merge evidence into an existing one
+        (matched on the deterministic ``fingerprint``). Returns
+        ``(hypothesis_id, was_new)``."""
+        with self._cursor() as cur:
+            existing = cur.execute(
+                "SELECT id, evidence_json FROM hypotheses WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            if existing:
+                # Merge evidence dicts (lists are concatenated and de-duplicated).
+                try:
+                    prior = dict(json.loads(existing["evidence_json"] or "{}"))
+                except (TypeError, ValueError):
+                    prior = {}
+                merged = _merge_evidence(prior, evidence)
+                cur.execute(
+                    """
+                    UPDATE hypotheses SET
+                        evidence_json = ?,
+                        updated_at    = datetime('now')
+                    WHERE id = ?
+                    """,
+                    (json.dumps(merged), int(existing["id"])),
+                )
+                return int(existing["id"]), False
+            cur.execute(
+                """
+                INSERT INTO hypotheses
+                    (kind, claim, claim_repr, fingerprint, evidence_json,
+                     status, method, verification_detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    kind, claim, claim_repr, fingerprint,
+                    json.dumps(evidence), status, method, verification_detail,
+                ),
+            )
+            return int(cur.lastrowid), True
+
+    def update_hypothesis_status(
+        self,
+        *,
+        hypothesis_id: int,
+        status: str,
+        method: str | None,
+        verification_detail: str | None,
+        rule_node: str | None = None,
+    ) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE hypotheses SET
+                    status              = ?,
+                    method              = ?,
+                    verification_detail = ?,
+                    rule_node           = COALESCE(?, rule_node),
+                    updated_at          = datetime('now')
+                WHERE id = ?
+                """,
+                (status, method, verification_detail, rule_node, int(hypothesis_id)),
+            )
+
+    def get_hypothesis(self, hypothesis_id: int) -> HypothesisRecord | None:
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT * FROM hypotheses WHERE id = ?", (int(hypothesis_id),),
+            ).fetchone()
+        return self._row_to_hypothesis(row) if row else None
+
+    def list_hypotheses(
+        self, *, status: str | None = None, kind: str | None = None,
+        limit: int = 200,
+    ) -> list[HypothesisRecord]:
+        sql = "SELECT * FROM hypotheses"
+        clauses: list[str] = []
+        args: list[Any] = []
+        if status:
+            clauses.append("status = ?"); args.append(status)
+        if kind:
+            clauses.append("kind = ?"); args.append(kind)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(int(limit))
+        with self._cursor() as cur:
+            rows = cur.execute(sql, args).fetchall()
+        return [self._row_to_hypothesis(r) for r in rows]
+
+    def hypothesis_counts(self) -> dict[str, int]:
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT status, COUNT(*) AS c FROM hypotheses GROUP BY status",
+            ).fetchall()
+        return {r["status"]: int(r["c"]) for r in rows}
 
     def attempt_timeline(self, limit: int = 500) -> list[dict[str, Any]]:
         """Recent attempts as plain dicts, suitable for charts / dashboards."""

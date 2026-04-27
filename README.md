@@ -17,21 +17,22 @@ See `PHILOSOPHY.md` for the longer version, and `SCHEMA.md` for the data model.
 
 ## Status
 
-This repo is **Phase 4** of a 5-phase plan. The later phases are not yet
-implemented; the architecture was designed so adding them is additive.
+This repo is **Phase 5 (feature-complete)** of the 5-phase plan.
 
 | Phase | Scope                                                   | State  |
 | ----- | ------------------------------------------------------- | ------ |
 | 1     | Skeleton · SymPy dispatch · verification · SQLite store | **done** |
 | 2     | Relational graph · similarity-based retrieval           | **done** |
-| 3     | Learning · approach ranking · reasoning trace           | **done (backend)** |
-| 4     | Multi-tool orchestration (numeric · Z3 · Wolfram)       | **done (backend)** |
-| 5     | Hypothesis generation · identity discovery              | planned |
+| 3     | Learning · approach ranking · reasoning trace           | **done** |
+| 4     | Multi-tool orchestration (numeric · Z3 · Wolfram)       | **done** |
+| 5     | Hypothesis generation · identity discovery              | **done** |
 
-> Phases 3 and 4 are backend-complete and verified end-to-end; the
-> matching frontend JS for the new trace renderer / Insights charts /
-> tool badges is still on Phase 2's layout. See the open `frontend/`
-> TODOs in the most recent commits for the punch list.
+The Phase 5 success criterion — "the system has proposed and verified at
+least one identity or shortcut that was not explicitly given to it" —
+is met: with no special priming, solving `sin(x)**2 + cos(x)**2` and
+`1` produces the verified hypothesis `sin(x)**2 + cos(x)**2 ≡ 1`,
+proven by SymPy, and a corresponding `rule` node appears in the graph
+with `uses_rule` edges back to the supporting problems.
 
 ### What Phase 1 does
 
@@ -78,10 +79,17 @@ implemented; the architecture was designed so adding them is additive.
 - **`GET /tools`** lists every registered tool with its availability and class name.
 - **End-to-end**: with the default registry (SymPy + numeric + Z3, Wolfram unavailable), `Integral(x**2, (x, 0, 1))` is solved by SymPy and cross-verified `agree` by numeric quadrature; quadratics are solved by `sympy.roots` and cross-verified by either numeric or Z3 depending on which is picked first.
 
-### What's still missing
+### What Phase 5 adds
 
-- **Frontend JS** — Phases 3 and 4 changed the response shape (`attempts[]`, `candidates[]`, `cross_verify_*` fields, `decision` / `learn` / `cross_verify` trace kinds, `/tools` endpoint), but `frontend/static/app.js` still renders the Phase 2 layout. The HTML and CSS scaffolding for the new panels and Insights charts already exist; the JS just needs to be updated.
-- **Phase 5 — hypothesis generation** — proposing identities and shortcuts from graph-structure analysis; not started.
+- **`pru_math/hypothesizer.py`** — three detectors that scan `tool_outcomes` and verified attempts for patterns and propose structured hypotheses with deterministic fingerprints (so re-scans merge evidence into existing rows rather than duplicating):
+  - `detect_specializations` — when one tool dominates a `problem_type` (verify rate ≥ 70%, n ≥ 3), propose "for this type, prefer that tool"
+  - `detect_recurring_approaches` — when one approach dominates a signature class (verify rate ≥ 80%, n ≥ 3), propose "for this signature, prefer this approach"
+  - `detect_identities` — group verified `SIMPLIFY/EXPAND/FACTOR` results by canonical form; pairs of distinct inputs that canonicalise to the same thing become candidate identities `lhs ≡ rhs`
+- **Verification pipeline** — for identities: SymPy `simplify(lhs - rhs) == 0` first, numeric sampling next, Z3 `unsat`-on-negation when the subset allows; for stat-style hypotheses: re-check the threshold against the live store. Each verifier records its method (`sympy` / `numeric` / `z3` / `stat`) and a one-line detail.
+- **Graph integration** — verified identities materialise as `rule` nodes (`r:hyp_<id>`) with `uses_rule` edges back to every supporting problem. They show up alongside everything else on the Graph tab.
+- **New endpoints**: `GET /hypotheses?status=&kind=`, `GET /hypotheses/{id}`, `POST /hypotheses/scan?verify=true`, `POST /hypotheses/{id}/verify`. `GET /db/stats` now includes a `hypotheses: {status: count}` map.
+- **Hypotheses tab** in the UI — list cards filtered by status / kind, scan-now button, re-verify per row, expandable raw evidence. The tab gains a count badge in the topbar.
+- **Schema**: a new `hypotheses` table with `status`, `kind`, `claim`, `claim_repr`, `fingerprint` (UNIQUE), `evidence_json`, `method`, `verification_detail`, `rule_node`, and timestamps. Indexes on `status` and `kind`. Auto-created on existing databases.
 
 ## Running it
 
@@ -171,6 +179,7 @@ translates language into a SymPy-parseable expression. See
 | `pru_math/retrieval.py`             | **Phase 2** — `find_similar_problems`, plus a sparse-matrix path for large graphs |
 | `pru_math/learner.py`               | **Phase 3** — UCB1 ranker over `(signature, tool, approach)` statistics |
 | `pru_math/tools/registry.py`        | **Phase 4** — `Tool` ABC + `ToolRegistry` for multi-tool orchestration |
+| `pru_math/hypothesizer.py`          | **Phase 5** — three detectors + verification pipeline for identities and routing rules |
 | `pru_math/tools/numeric_tool.py`    | **Phase 4** — scipy / mpmath fallback (`numeric.fsolve`, `numeric.brentq`, `numeric.quad`, `numeric.evalf`) |
 | `pru_math/tools/z3_tool.py`         | **Phase 4** — Z3 SMT backend with SymPy→Z3 translator (graceful when missing) |
 | `pru_math/tools/wolfram_tool.py`    | **Phase 4** — optional HTTP backend, gated by `WOLFRAM_APP_ID` |
@@ -185,7 +194,7 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-109 tests covering the parser (three formats), fingerprint determinism
+121 tests covering the parser (three formats), fingerprint determinism
 and similarity, SymPy tool dispatch for every supported problem type,
 the verifier against correct and wrong candidates, the SQLite store,
 the graph (node/edge add, similarity edges, persistence round-trip,
@@ -199,10 +208,15 @@ graceful fail on transcendental input), the **Wolfram tool** (gated by
 `WOLFRAM_APP_ID`, mock-based smoke), **cross-verification persistence**
 (decision step lists multiple tools, cross-verify trace step exists when
 enabled, `cross_verify_status` written to the attempt row, skipped cleanly
-when no second tool can handle the problem), and the FastAPI layer via
-`TestClient` (`/solve`, `/problems/{id}/similar`, `/graph`,
-`/graph/around/{id}`, `/graph/stats`, `/attempts`, `/tool_outcomes`,
-`/db/stats`).
+when no second tool can handle the problem), the **hypothesizer**
+(Pythagorean identity discovery from raw inputs alone, verifier proves
+correct pairs and refutes wrong ones, specialisation /
+recurring-approach detection on synthetic stats, scan idempotency,
+verified identities materialise rule nodes in the graph), the
+**hypotheses API** (scan, status filter, get one, re-verify, 404), and
+the FastAPI layer via `TestClient` (`/solve`, `/problems/{id}/similar`,
+`/graph`, `/graph/around/{id}`, `/graph/stats`, `/attempts`,
+`/tool_outcomes`, `/db/stats`, `/hypotheses`).
 
 The NL parser is exercised via a mock so the suite doesn't need a running
 Ollama. Z3 tests skip cleanly when `z3-solver` is not installed.
