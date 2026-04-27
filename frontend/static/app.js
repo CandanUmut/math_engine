@@ -22,7 +22,7 @@ function pct(n) {
 
 /* ── Tabs ─────────────────────────────────────────────────────────── */
 
-const TABS = ["solve", "graph", "database", "insights"];
+const TABS = ["solve", "graph", "database", "insights", "hypotheses"];
 function activateTab(name) {
   TABS.forEach((t) => {
     const btn = document.querySelector(`.tab[data-tab="${t}"]`);
@@ -33,6 +33,7 @@ function activateTab(name) {
   if (name === "graph") refreshGraph();
   if (name === "database") loadDbTable(currentDbView);
   if (name === "insights") refreshInsights();
+  if (name === "hypotheses") refreshHypotheses();
 }
 
 /* ── Stats / status ───────────────────────────────────────────────── */
@@ -47,6 +48,14 @@ async function refreshStats() {
     if (s.graph) {
       $("stat-nodes").textContent = s.graph.nodes ?? 0;
       $("stat-edges").textContent = s.graph.edges ?? 0;
+    }
+    const hyp = s.hypotheses || {};
+    const hypTotal = Object.values(hyp).reduce((a, b) => a + b, 0);
+    const badge = $("tab-badge-hypotheses");
+    if (badge) {
+      badge.hidden = hypTotal === 0;
+      badge.textContent = String(hypTotal);
+      badge.title = JSON.stringify(hyp);
     }
   } catch (_) { /* ignore */ }
 }
@@ -677,6 +686,104 @@ async function refreshInsights() {
   }
 }
 
+/* ── Hypotheses tab (Phase 5) ─────────────────────────────────────── */
+
+async function refreshHypotheses() {
+  const status = $("hyp-filter-status").value;
+  const kind = $("hyp-filter-kind").value;
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (kind) params.set("kind", kind);
+  params.set("limit", "200");
+  const host = $("hyp-list");
+  host.innerHTML = '<div class="subtle" style="padding:12px">loading…</div>';
+  try {
+    const data = await fetch(`/hypotheses?${params}`).then((r) => r.json());
+    const items = data.items || [];
+    if (!items.length) {
+      host.innerHTML = `<div class="subtle" style="padding:12px">
+        No hypotheses yet. Solve a few problems and click "scan now".
+      </div>`;
+      return;
+    }
+    host.innerHTML = items.map(renderHypothesisCard).join("");
+  } catch (err) {
+    host.innerHTML = `<div class="subtle" style="padding:12px">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderHypothesisCard(h) {
+  const status = h.status || "proposed";
+  const kind = h.kind || "?";
+  const ev = h.evidence || {};
+  const evidenceLine = renderEvidenceSummary(h);
+  const detailJson = JSON.stringify(h, null, 2);
+  return `<div class="hyp-card">
+    <div class="row1">
+      <span class="id">#${h.id}</span>
+      <span class="tag kind-${escapeHtml(kind)}">${escapeHtml(kind)}</span>
+      <span class="tag status-${escapeHtml(status)}">${escapeHtml(status)}</span>
+      ${h.method ? tag(h.method) : ""}
+      <span class="claim">${escapeHtml(h.claim || "")}</span>
+    </div>
+    <div class="row2">
+      ${evidenceLine}
+      <span class="subtle">updated ${escapeHtml(h.updated_at || "")}</span>
+      ${h.rule_node ? `<span class="tag">rule node ${escapeHtml(h.rule_node)}</span>` : ""}
+      <button class="subtle-btn" data-action="reverify" data-id="${h.id}">re-verify</button>
+    </div>
+    ${h.verification_detail ? `<div class="subtle" style="margin-top:6px">${escapeHtml(h.verification_detail)}</div>` : ""}
+    <details><summary>raw evidence</summary><pre>${escapeHtml(detailJson)}</pre></details>
+  </div>`;
+}
+
+function renderEvidenceSummary(h) {
+  const ev = h.evidence || {};
+  if (h.kind === "identity") {
+    const ids = (ev.support_problem_ids || []).slice(0, 6).join(", ");
+    return `<span>${ids ? "from #" + ids : "(no support ids)"}</span>`;
+  }
+  if (h.kind === "specialization") {
+    const leader = ev.leader || {};
+    return `<span>${escapeHtml(ev.problem_type || "?")} · leader ${escapeHtml(leader.tool || "?")} (${leader.verified ?? "?"}/${leader.attempts ?? "?"})</span>`;
+  }
+  if (h.kind === "recurring_approach") {
+    const leader = ev.leader || {};
+    return `<span>sig ${escapeHtml((ev.signature || "").slice(0, 8))} · ${escapeHtml(leader.approach || "?")} (${leader.verified ?? "?"}/${leader.attempts ?? "?"})</span>`;
+  }
+  return "";
+}
+
+async function triggerHypothesisScan() {
+  const btn = $("hyp-scan");
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = "scanning…";
+  try {
+    const r = await fetch("/hypotheses/scan", { method: "POST" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    await r.json();
+    await refreshHypotheses();
+    refreshStats();
+  } catch (err) {
+    alert("scan failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function reverifyHypothesis(id) {
+  try {
+    const r = await fetch(`/hypotheses/${id}/verify`, { method: "POST" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    await refreshHypotheses();
+    refreshStats();
+  } catch (err) {
+    alert("re-verify failed: " + err.message);
+  }
+}
+
 /* ── Bootstrap ────────────────────────────────────────────────────── */
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -705,6 +812,16 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("trace-collapse")?.addEventListener("click", () => {
     if (traceList) traceList.querySelectorAll("details").forEach((d) => (d.open = false));
+  });
+
+  // Phase 5: hypotheses tab controls
+  $("hyp-scan")?.addEventListener("click", triggerHypothesisScan);
+  $("hyp-refresh")?.addEventListener("click", refreshHypotheses);
+  $("hyp-filter-status")?.addEventListener("change", refreshHypotheses);
+  $("hyp-filter-kind")?.addEventListener("change", refreshHypotheses);
+  $("hyp-list")?.addEventListener("click", (e) => {
+    const btn = e.target.closest('[data-action="reverify"]');
+    if (btn) reverifyHypothesis(btn.dataset.id);
   });
 
   refreshStats();

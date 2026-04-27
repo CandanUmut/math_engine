@@ -316,6 +316,80 @@ button.subtle-btn:hover { color: var(--text); transform: none; box-shadow: none;
 /* Attempt result row helper used by the Attempts panel */
 .attempt-row .vresult { font-family: var(--mono); font-size: 11.5px; }
 
+/* ── Hypotheses tab (Phase 5) ────────────────────────────────────── */
+
+.tab-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 7px;
+  border-radius: 999px; font-size: 10px; font-variant-numeric: tabular-nums;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #0b0d12; font-weight: 700;
+}
+
+#tab-hypotheses {
+  grid-template-rows: auto 1fr;
+  padding: 16px 24px 24px;
+  gap: 12px;
+}
+.hyp-toolbar {
+  display: grid; grid-template-columns: 1fr; gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 14px 18px;
+}
+.hyp-toolbar h2 {
+  margin: 0;
+  font-size: 13px; text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--muted); font-weight: 600;
+}
+.hyp-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.hyp-controls select {
+  background: rgba(0,0,0,0.32); color: var(--text);
+  border: 1px solid var(--panel-border); border-radius: 8px;
+  padding: 5px 10px; font-family: var(--mono); font-size: 12.5px;
+}
+
+.hyp-list { display: grid; gap: 10px; }
+
+.hyp-card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 14px 18px;
+}
+.hyp-card .row1 {
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; margin-bottom: 8px;
+}
+.hyp-card .id { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.hyp-card .claim {
+  font-family: var(--mono); font-size: 14px;
+  flex: 1; word-break: break-word;
+}
+.hyp-card .row2 {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  font-size: 12px; color: var(--muted);
+}
+.hyp-card details {
+  margin-top: 8px; color: var(--muted); font-size: 12.5px;
+}
+.hyp-card details > summary {
+  cursor: pointer; user-select: none;
+  padding: 4px 0; font-family: var(--mono);
+}
+.hyp-card pre {
+  margin-top: 6px; max-height: 240px; overflow: auto;
+}
+
+.tag.kind-identity            { color: var(--accent);    border-color: rgba(124,156,255,0.4); }
+.tag.kind-specialization      { color: var(--warn);      border-color: rgba(255,176,120,0.4); }
+.tag.kind-recurring_approach  { color: var(--signature); border-color: rgba(183,140,255,0.4); }
+
+.tag.status-verified     { color: var(--good); border-color: rgba(124,240,194,0.4); }
+.tag.status-refuted      { color: var(--bad);  border-color: rgba(255,133,145,0.4); }
+.tag.status-proposed     { color: var(--accent); border-color: rgba(124,156,255,0.4); }
+.tag.status-inconclusive { color: var(--muted); }
+
 pre {
   background: rgba(0,0,0,0.32);
   border: 1px solid var(--panel-border);

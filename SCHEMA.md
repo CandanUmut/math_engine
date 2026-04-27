@@ -173,6 +173,33 @@ computes cosine similarity in one BLAS-backed `scipy.sparse` multiplication.
 Below 200 nodes the simple Python scan is faster, and the sparse path
 falls back to it.
 
+## `hypotheses` (Phase 5)
+
+One row per hypothesis the engine has proposed. The same hypothesis is
+not stored twice — the deterministic ``fingerprint`` column is UNIQUE,
+so re-running ``hypothesizer.scan()`` merges any new evidence into the
+existing row instead of duplicating it.
+
+| column                | type    | notes |
+| --------------------- | ------- | ----- |
+| `id`                  | INTEGER | primary key |
+| `kind`                | TEXT    | `"identity"` \| `"specialization"` \| `"recurring_approach"` |
+| `claim`               | TEXT    | one-line human-readable claim, e.g. `"sin(x)**2 + cos(x)**2  ≡  1"` |
+| `claim_repr`          | TEXT    | machine-checkable form (used by detectors and verifiers) |
+| `fingerprint`         | TEXT    | SHA1(``kind|claim_repr``) truncated to 20 chars; UNIQUE |
+| `evidence_json`       | TEXT    | structured evidence: supporting problem ids, leader stats, etc. |
+| `status`              | TEXT    | `"proposed"` \| `"verified"` \| `"refuted"` \| `"inconclusive"` |
+| `method`              | TEXT    | which verifier returned the status: `"sympy"` \| `"numeric"` \| `"z3"` \| `"stat"` \| NULL |
+| `verification_detail` | TEXT    | one-line explanation of the verifier's decision |
+| `rule_node`           | TEXT    | id of the corresponding `rule` node in the graph (if verified) |
+| `created_at`          | TEXT    | ISO timestamp |
+| `updated_at`          | TEXT    | ISO timestamp |
+
+Indexes: `idx_hypotheses_status`, `idx_hypotheses_kind`. Verified
+identities additionally appear in the graph as `rule` nodes named
+`r:hyp_<id>` connected to every problem in their `support_problem_ids`
+via `uses_rule` edges.
+
 ## Tool registry (Phase 4)
 
 Every backend implements the `Tool` ABC in `pru_math/tools/base.py`:
