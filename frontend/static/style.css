@@ -206,6 +206,7 @@ button.subtle-btn:hover { color: var(--text); transform: none; box-shadow: none;
 .trace .kind.k-decision    { color: var(--accent);    border-color: rgba(124,156,255,0.4); }
 .trace .kind.k-tool_call   { color: var(--accent-2);  border-color: rgba(124,240,194,0.4); }
 .trace .kind.k-verify      { color: var(--good);      border-color: rgba(124,240,194,0.4); }
+.trace .kind.k-cross_verify{ color: var(--rule);      border-color: rgba(255,133,145,0.4); }
 .trace .kind.k-learn       { color: var(--warn);      border-color: rgba(255,176,120,0.4); }
 .trace .kind.k-graph_update{ color: var(--signature); border-color: rgba(183,140,255,0.4); }
 .trace .summary { font-size: 13.5px; }
@@ -279,6 +280,41 @@ button.subtle-btn:hover { color: var(--text); transform: none; box-shadow: none;
 }
 .attempt-row.chosen { background: rgba(124,240,194,0.06); }
 .mono-inline { font-family: var(--mono); }
+
+/* Tools bar — registered backends and their availability */
+.tools-bar {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  padding: 8px 28px 0;
+  max-width: 1200px; margin: 0 auto; align-items: center;
+}
+.tools-bar .label {
+  color: var(--muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.1em; margin-right: 4px;
+}
+.tool-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--panel-border);
+  background: rgba(0,0,0,0.18);
+  padding: 3px 10px 3px 8px;
+  border-radius: 999px;
+  font-size: 12px; font-family: var(--mono);
+}
+.tool-badge .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); display: inline-block;
+}
+.tool-badge.on  .dot { background: var(--good);  box-shadow: 0 0 6px rgba(124,240,194,0.7); }
+.tool-badge.off { color: var(--muted); }
+.tool-badge.off .dot { background: var(--bad); opacity: 0.4; }
+
+/* Cross-verify badges */
+.tag.cv-agree       { color: var(--good); border-color: rgba(124,240,194,0.4); }
+.tag.cv-disagree    { color: var(--bad);  border-color: rgba(255,133,145,0.4); }
+.tag.cv-inconclusive,
+.tag.cv-unsupported { color: var(--muted); }
+
+/* Attempt result row helper used by the Attempts panel */
+.attempt-row .vresult { font-family: var(--mono); font-size: 11.5px; }
 
 pre {
   background: rgba(0,0,0,0.32);

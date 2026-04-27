@@ -6,6 +6,20 @@ const escapeHtml = (s) =>
 const fmtNum = (n, d = 2) =>
   Number.isFinite(n) ? Number(n).toFixed(d) : "–";
 
+const VERIFY_CLS = (s) =>
+  s === "verified" ? "good" : s === "refuted" ? "bad" : s ? "warn" : "";
+const CV_CLS = (s) => (s ? `cv-${s}` : "");
+
+function tag(text, cls = "") {
+  if (text === null || text === undefined || text === "") return "";
+  const c = cls ? ` ${cls}` : "";
+  return `<span class="tag${c}">${escapeHtml(text)}</span>`;
+}
+
+function pct(n) {
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : "–";
+}
+
 /* ── Tabs ─────────────────────────────────────────────────────────── */
 
 const TABS = ["solve", "graph", "database", "insights"];
@@ -116,25 +130,130 @@ function renderOutcome(out) {
   if (out.approach) meta.push(`<span class="tag">${escapeHtml(out.approach)}</span>`);
   if (Number.isFinite(out.time_ms)) meta.push(`<span class="tag">${out.time_ms.toFixed(1)} ms</span>`);
   meta.push(renderVerificationTag(out.verification_status));
+  // Cross-verify badge from the chosen attempt (if any).
+  const chosen = (out.attempts || []).find((a) => a.verification_status === "verified")
+              || (out.attempts || [])[0];
+  if (chosen && chosen.cross_verify_status) {
+    meta.push(`<span class="tag ${CV_CLS(chosen.cross_verify_status)}">cross: ${escapeHtml(chosen.cross_verify_status)}${chosen.cross_verify_tool ? " · " + escapeHtml(chosen.cross_verify_tool) : ""}</span>`);
+  }
   if (out.problem_id != null) meta.push(`<span class="tag">#${out.problem_id}</span>`);
   $("answer-meta").innerHTML = meta.filter(Boolean).join(" ");
 
   const items = (out.similar || []);
   $("similar-hint").textContent = items.length
-    ? `Surfaced ${items.length} structurally similar past problem(s) before solving — Phase 2 only displays them; Phase 3 will route on them.`
+    ? `Surfaced ${items.length} structurally similar past problem(s) before solving — the learner uses their attempts to rank approaches.`
     : "No similar past problems yet — first of its kind in the graph.";
   renderSimilar(items);
 
-  $("trace").innerHTML = (out.trace || []).map((s) => {
-    const detail = s.detail ? JSON.stringify(s.detail, null, 2) : "";
-    return `<li>
-      <span class="kind">${escapeHtml(s.kind)}</span>
-      <span class="summary">${escapeHtml(s.summary)}</span>
-      ${detail ? `<pre class="detail">${escapeHtml(detail)}</pre>` : ""}
-    </li>`;
-  }).join("");
+  renderAttempts(out);
+  renderTrace(out.trace || []);
 
   $("fp").textContent = JSON.stringify(out.fingerprint, null, 2);
+}
+
+function renderTrace(steps) {
+  $("trace").innerHTML = steps.map((s) => {
+    const kindClass = `k-${(s.kind || "").replace(/[^a-z_]/gi, "")}`;
+    const detail = renderTraceDetail(s);
+    return `<li>
+      <span class="kind ${kindClass}">${escapeHtml(s.kind)}</span>
+      <span class="summary">${escapeHtml(s.summary || "")}</span>
+      ${detail}
+    </li>`;
+  }).join("");
+}
+
+function renderTraceDetail(step) {
+  const d = step.detail;
+  if (!d || typeof d !== "object") return "";
+  // Decision step: show the candidate table in styled form.
+  if (step.kind === "decision" && Array.isArray(d.candidates)) {
+    return `<details><summary>candidates · policy ${escapeHtml(d.policy || "?")} · max_attempts ${d.max_attempts ?? "?"}</summary>
+      ${renderCandidateTable(d.candidates)}
+      ${d.tools_available ? `<div class="subtle" style="margin-top:6px">tools: ${d.tools_available.map((t) => escapeHtml(t)).join(", ")}</div>` : ""}
+    </details>`;
+  }
+  // Other kinds: pretty-print JSON inside a collapsible block.
+  return `<details><summary>detail</summary>
+    <pre class="detail">${escapeHtml(JSON.stringify(d, null, 2))}</pre>
+  </details>`;
+}
+
+function renderCandidateTable(candidates) {
+  if (!candidates || !candidates.length) return "";
+  const max = Math.max(0.001, ...candidates.map((c) => c.score || 0));
+  const rows = candidates.map((c, i) => {
+    const w = Math.round(((c.score || 0) / max) * 100);
+    const sigLabel = c.sig_attempts
+      ? `${c.sig_verified}/${c.sig_attempts}`
+      : c.type_attempts
+        ? `<span class="subtle">type ${c.type_verified}/${c.type_attempts}</span>`
+        : `<span class="subtle">unseen</span>`;
+    const conf = Number.isFinite(c.confidence) ? c.confidence.toFixed(2) : "—";
+    return `<tr class="${i === 0 ? "chosen" : ""}">
+      <td>${i + 1}</td>
+      <td><span class="approach">${escapeHtml(c.tool || "?")}.${escapeHtml((c.approach || "").replace(/^[^.]+\./, ""))}</span></td>
+      <td class="num"><span class="bar"><span style="width:${w}%"></span></span> ${(c.score || 0).toFixed(3)}</td>
+      <td class="num">${(c.value || 0).toFixed(2)}</td>
+      <td class="num">${(c.bonus || 0).toFixed(2)}</td>
+      <td class="num">${conf}</td>
+      <td>${sigLabel}</td>
+      <td title="${escapeHtml(c.rationale || "")}">${escapeHtml((c.rationale || "").slice(0, 60))}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="candidate-table"><table>
+    <thead><tr>
+      <th>#</th><th>tool.approach</th><th>score</th>
+      <th>value</th><th>bonus</th><th>conf</th><th>sig n/N</th><th>rationale</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+function renderAttempts(out) {
+  const card = $("attempts-card");
+  const host = $("attempts");
+  const attempts = out.attempts || [];
+  if (!attempts.length) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  $("attempts-hint").textContent =
+    `Multi-attempt loop tried ${attempts.length} approach(es); the verified one is highlighted. Total wall time ${(out.total_time_ms || 0).toFixed(1)} ms.`;
+  // The chosen attempt is the verified one if any; otherwise the surfaced approach.
+  let chosenIdx = attempts.findIndex((a) => a.verification_status === "verified");
+  if (chosenIdx < 0) chosenIdx = attempts.findIndex((a) => a.approach === out.approach);
+  host.innerHTML = attempts.map((a, i) => {
+    const v = a.verification_status;
+    const cv = a.cross_verify_status;
+    const cls = i === chosenIdx ? " chosen" : "";
+    const result = a.result_pretty ?? a.error ?? "—";
+    const cvBadge = cv
+      ? `<span class="tag ${CV_CLS(cv)}">cross: ${escapeHtml(cv)}${a.cross_verify_tool ? " · " + escapeHtml(a.cross_verify_tool) : ""}</span>`
+      : "";
+    return `<div class="attempt-row${cls}">
+      <span class="idx">${i + 1}.</span>
+      <span class="approach">${escapeHtml(a.tool || "?")}.${escapeHtml((a.approach || "").replace(/^[^.]+\./, ""))}</span>
+      <span class="result vresult" title="${escapeHtml(result)}">${escapeHtml(String(result))}</span>
+      <span>${tag(v, VERIFY_CLS(v))} ${cvBadge}</span>
+      <span class="t">${a.time_ms ? a.time_ms.toFixed(1) + " ms" : ""}</span>
+    </div>`;
+  }).join("");
+}
+
+async function refreshToolsBar() {
+  const host = $("tools-bar");
+  if (!host) return;
+  try {
+    const data = await fetch("/tools").then((r) => r.json());
+    const items = data.items || [];
+    const badges = items.map((t) => {
+      const cls = t.available ? "on" : "off";
+      return `<span class="tool-badge ${cls}" title="${escapeHtml(t.class || "")}"><span class="dot"></span>${escapeHtml(t.name)}</span>`;
+    }).join("");
+    host.innerHTML = `<span class="label">tools</span>${badges}`;
+  } catch (_) { /* ignore */ }
 }
 
 async function submitSolve() {
@@ -340,6 +459,93 @@ function renderDbTable() {
 
 /* ── Insights tab ─────────────────────────────────────────────────── */
 
+const CHARTS = {};
+
+const CHART_COLORS = {
+  accent:  "#7c9cff",
+  accent2: "#7cf0c2",
+  warn:    "#ffb078",
+  bad:     "#ff8591",
+  muted:   "rgba(232,235,240,0.18)",
+  text:    "#9aa3b2",
+};
+
+function chartDefaults() {
+  return {
+    plugins: { legend: { labels: { color: CHART_COLORS.text, font: { size: 10 } } } },
+    scales: {
+      x: { ticks: { color: CHART_COLORS.text, font: { size: 9 } },
+           grid: { color: CHART_COLORS.muted } },
+      y: { ticks: { color: CHART_COLORS.text, font: { size: 9 } },
+           grid: { color: CHART_COLORS.muted } },
+    },
+    responsive: true,
+    maintainAspectRatio: false,
+  };
+}
+
+function upsertChart(canvasId, type, data, options) {
+  const ctx = $(canvasId);
+  if (!ctx) return;
+  if (CHARTS[canvasId]) {
+    CHARTS[canvasId].data = data;
+    CHARTS[canvasId].options = options || CHARTS[canvasId].options;
+    CHARTS[canvasId].update();
+    return;
+  }
+  // eslint-disable-next-line no-undef
+  CHARTS[canvasId] = new Chart(ctx, { type, data, options });
+}
+
+function rollingVerifyRate(timeline, window = 20) {
+  // timeline is newest-first; reverse so we plot left-to-right in time.
+  const rows = timeline.slice().reverse();
+  const out = { labels: [], rates: [] };
+  let q = [];
+  rows.forEach((r, i) => {
+    q.push(r.verification_status === "verified" ? 1 : 0);
+    if (q.length > window) q.shift();
+    out.labels.push(`#${r.id}`);
+    out.rates.push(q.reduce((a, b) => a + b, 0) / q.length);
+  });
+  return out;
+}
+
+function attemptsPerProblem(timeline) {
+  // group recent attempts by problem_id, plot a moving avg of attempt-counts.
+  const rows = timeline.slice().reverse();
+  const counts = {};
+  const order = [];
+  rows.forEach((r) => {
+    if (counts[r.problem_id] === undefined) order.push(r.problem_id);
+    counts[r.problem_id] = (counts[r.problem_id] || 0) + 1;
+  });
+  const labels = order.map((pid) => `#${pid}`);
+  const values = order.map((pid) => counts[pid]);
+  // 5-problem moving average for a cleaner trend line.
+  const window = 5;
+  const avg = values.map((_, i) => {
+    const slice = values.slice(Math.max(0, i - window + 1), i + 1);
+    return slice.reduce((a, b) => a + b, 0) / slice.length;
+  });
+  return { labels, values, avg };
+}
+
+function timeByType(timeline) {
+  const sums = {};
+  const counts = {};
+  timeline.forEach((r) => {
+    const k = r.problem_type || "unknown";
+    sums[k] = (sums[k] || 0) + (r.time_ms || 0);
+    counts[k] = (counts[k] || 0) + 1;
+  });
+  const types = Object.keys(sums).sort();
+  return {
+    labels: types,
+    values: types.map((k) => counts[k] ? sums[k] / counts[k] : 0),
+  };
+}
+
 function bar(label, value, max, suffix = "") {
   const pct = max > 0 ? Math.round((value / max) * 100) : 0;
   return `<div class="bar-row">
@@ -351,41 +557,123 @@ function bar(label, value, max, suffix = "") {
 
 async function refreshInsights() {
   try {
-    const [stats, outcomes] = await Promise.all([
+    const [stats, outcomes, timeline, recent] = await Promise.all([
       fetch("/db/stats").then((r) => r.json()),
-      fetch("/tool_outcomes?limit=50").then((r) => r.json()),
+      fetch("/tool_outcomes?limit=80").then((r) => r.json()),
+      fetch("/attempts/timeline?limit=500").then((r) => r.json()),
+      fetch("/problems?limit=200").then((r) => r.json()),
     ]);
+
+    // ── Chart 1: rolling verify rate over recent attempts ────────────
+    const tl = (timeline.items || []);
+    if (tl.length) {
+      const rv = rollingVerifyRate(tl, 20);
+      upsertChart("chart-verify-time", "line", {
+        labels: rv.labels,
+        datasets: [{
+          label: "rolling verify rate (window 20)",
+          data: rv.rates,
+          borderColor: CHART_COLORS.accent2,
+          backgroundColor: "rgba(124,240,194,0.10)",
+          borderWidth: 2,
+          tension: 0.3,
+          pointRadius: 0,
+          fill: true,
+        }],
+      }, {
+        ...chartDefaults(),
+        scales: {
+          ...chartDefaults().scales,
+          y: { ...chartDefaults().scales.y, min: 0, max: 1,
+               ticks: { ...chartDefaults().scales.y.ticks,
+                        callback: (v) => Math.round(v * 100) + "%" } },
+        },
+      });
+    }
+
+    // ── Chart 2: attempts-per-problem trend ──────────────────────────
+    if (tl.length) {
+      const ap = attemptsPerProblem(tl);
+      upsertChart("chart-attempts-per-problem", "bar", {
+        labels: ap.labels,
+        datasets: [
+          {
+            label: "attempts per problem",
+            data: ap.values,
+            backgroundColor: "rgba(124,156,255,0.45)",
+            borderColor: CHART_COLORS.accent,
+            borderWidth: 1,
+          },
+          {
+            type: "line",
+            label: "5-problem moving avg",
+            data: ap.avg,
+            borderColor: CHART_COLORS.warn,
+            backgroundColor: "transparent",
+            borderWidth: 2,
+            tension: 0.3,
+            pointRadius: 0,
+          },
+        ],
+      }, {
+        ...chartDefaults(),
+        scales: {
+          ...chartDefaults().scales,
+          y: { ...chartDefaults().scales.y, min: 0, suggestedMax: 3 },
+        },
+      });
+    }
+
+    // ── Chart 3: average solve time by problem type ──────────────────
+    if (tl.length) {
+      const tt = timeByType(tl);
+      upsertChart("chart-time-by-type", "bar", {
+        labels: tt.labels,
+        datasets: [{
+          label: "avg time (ms)",
+          data: tt.values,
+          backgroundColor: "rgba(183,140,255,0.45)",
+          borderColor: "#b78cff",
+          borderWidth: 1,
+        }],
+      }, chartDefaults());
+    }
+
+    // ── Bars: per-(sig, approach) verify rates ───────────────────────
+    const items = outcomes.items || [];
+    if (!items.length) {
+      $("insights-tools").innerHTML = '<span class="subtle">No data yet.</span>';
+    } else {
+      $("insights-tools").innerHTML = items.slice(0, 16).map((o) => {
+        const label = `${o.tool}.${(o.approach || "").replace(/^[^.]+\./, "")} · sig ${(o.signature || "").slice(0, 8)}`;
+        const p = Math.round((o.verify_rate || 0) * 100);
+        const fails = (o.failure_modes || []).slice(-3).join(", ");
+        return `<div class="bar-row">
+          <span class="label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+          <span class="bar"><span style="width:${p}%"></span></span>
+          <span class="v">${p}% · ${o.n_attempts}×${fails ? ` · ${escapeHtml(fails)}` : ""}</span>
+        </div>`;
+      }).join("");
+    }
+
+    // ── Bars: by problem type ────────────────────────────────────────
     const types = stats.by_problem_type || {};
     const tmax = Math.max(1, ...Object.values(types));
     $("insights-types").innerHTML = Object.entries(types)
       .sort((a, b) => b[1] - a[1])
       .map(([k, v]) => bar(k, v, tmax)).join("") || '<span class="subtle">No data yet.</span>';
 
-    const items = outcomes.items || [];
-    if (!items.length) {
-      $("insights-tools").innerHTML = '<span class="subtle">No data yet.</span>';
-    } else {
-      $("insights-tools").innerHTML = items.slice(0, 12).map((o) => {
-        const label = `${o.approach} · sig ${o.signature.slice(0, 8)}`;
-        const pct = Math.round((o.verify_rate || 0) * 100);
-        return `<div class="bar-row">
-          <span class="label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
-          <span class="bar"><span style="width:${pct}%"></span></span>
-          <span class="v">${pct}% · ${o.n_attempts}×</span>
-        </div>`;
-      }).join("");
-    }
-
-    // We don't have a "by source format" endpoint yet; derive from /problems.
-    const recent = await fetch("/problems?limit=200").then((r) => r.json());
+    // ── Bars: by source format (derived from /problems) ─────────────
     const bySource = {};
-    (recent.items || []).forEach((p) => { bySource[p.source_format] = (bySource[p.source_format] || 0) + 1; });
+    (recent.items || []).forEach((p) => {
+      bySource[p.source_format] = (bySource[p.source_format] || 0) + 1;
+    });
     const smax = Math.max(1, ...Object.values(bySource));
     $("insights-sources").innerHTML = Object.entries(bySource)
       .sort((a, b) => b[1] - a[1])
       .map(([k, v]) => bar(k, v, smax)).join("") || '<span class="subtle">No data yet.</span>';
   } catch (err) {
-    $("insights-tools").innerHTML = `<span class="subtle">${escapeHtml(err.message)}</span>`;
+    $("insights-tools").innerHTML = `<span class="subtle">Failed to load insights: ${escapeHtml(err.message)}</span>`;
   }
 }
 
@@ -410,6 +698,16 @@ document.addEventListener("DOMContentLoaded", () => {
   $("graph-refresh").addEventListener("click", refreshGraph);
   $("db-filter").addEventListener("input", renderDbTable);
 
+  // Trace expand / collapse controls (Phase 3+)
+  const traceList = $("trace");
+  $("trace-expand")?.addEventListener("click", () => {
+    if (traceList) traceList.querySelectorAll("details").forEach((d) => (d.open = true));
+  });
+  $("trace-collapse")?.addEventListener("click", () => {
+    if (traceList) traceList.querySelectorAll("details").forEach((d) => (d.open = false));
+  });
+
   refreshStats();
   refreshRecent();
+  refreshToolsBar();
 });
