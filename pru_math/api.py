@@ -1,4 +1,4 @@
-"""FastAPI layer exposing the Phase 1+2+3 reasoner.
+"""FastAPI layer exposing the Phase 1+2+3+4 reasoner.
 
 Endpoints
 ---------
@@ -10,6 +10,7 @@ Endpoints
 - ``GET  /attempts/timeline``              — recent attempts joined to problems (for charts)
 - ``GET  /tool_outcomes``                  — aggregated tool stats
 - ``GET  /learner/rank``                   — preview the learner's rank for a (sig, type)
+- ``GET  /tools``                          — registered tools and their availability (Phase 4)
 - ``GET  /graph``                          — full graph as cytoscape JSON
 - ``GET  /graph/around/{id}?radius=1``     — subgraph around a problem
 - ``GET  /graph/stats``                    — node/edge counts by kind
@@ -33,6 +34,7 @@ from .reasoner import Reasoner
 from .retrieval import find_similar_problems
 from .store import Store
 from .tools import sympy_tool
+from .tools.registry import ToolRegistry, default_registry
 
 
 class SolveRequest(BaseModel):
@@ -50,6 +52,10 @@ def _attempt_to_dict(a) -> dict[str, Any]:
         "result_pretty": a.result_pretty,
         "verification_status": a.verification_status,
         "verification_detail": a.verification_detail,
+        "cross_verify_tool": a.cross_verify_tool,
+        "cross_verify_status": a.cross_verify_status,
+        "cross_verify_detail": a.cross_verify_detail,
+        "cross_verify_time_ms": a.cross_verify_time_ms,
         "time_ms": a.time_ms,
         "error": a.error,
         "steps": a.steps,
@@ -73,13 +79,15 @@ def _problem_to_dict(p) -> dict[str, Any]:
 
 def create_app(store: Store | None = None,
                graph: RelationalGraph | None = None,
-               learner: Learner | None = None) -> FastAPI:
+               learner: Learner | None = None,
+               registry: ToolRegistry | None = None) -> FastAPI:
     store = store or Store()
     graph = graph or RelationalGraph()
     learner = learner or Learner(store)
-    reasoner = Reasoner(store=store, graph=graph, learner=learner)
+    registry = registry or default_registry()
+    reasoner = Reasoner(store=store, graph=graph, learner=learner, registry=registry)
 
-    app = FastAPI(title="PRU Math Engine", version="0.3.0")
+    app = FastAPI(title="PRU Math Engine", version="0.4.0")
 
     # --- Solve / problems ----------------------------------------------------
 
@@ -217,6 +225,14 @@ def create_app(store: Store | None = None,
             "tool_timeout_s": CONFIG.tool_timeout_s,
             "max_attempts": CONFIG.max_attempts,
             "learner_exploration": CONFIG.learner_exploration,
+            "cross_verify": CONFIG.cross_verify,
+        }
+
+    @app.get("/tools")
+    def list_tools() -> dict[str, Any]:
+        return {
+            "items": registry.status(),
+            "available": [t.name for t in registry.available_tools()],
         }
 
     # --- Frontend (static UI) -----------------------------------------------

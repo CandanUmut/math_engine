@@ -24,47 +24,62 @@ Indexes: `idx_problems_signature`, `idx_problems_type`.
 
 ## `attempts`
 
-One row per tool invocation against a problem. Phase 1 only produces one
-attempt per problem (single tool, single approach); later phases may produce
-several.
+One row per tool invocation against a problem. Phase 1 produces one attempt
+per problem; Phase 3 produces up to `PRU_MAX_ATTEMPTS` (default 3) when
+earlier ones don't verify; Phase 4 adds cross-verification fields populated
+on the chosen verified attempt.
 
-| column                | type    | notes |
-| --------------------- | ------- | ----- |
-| `id`                  | INTEGER | primary key |
-| `problem_id`          | INTEGER | FK → `problems.id`, `ON DELETE CASCADE` |
-| `tool`                | TEXT    | e.g. `"sympy"` |
-| `approach`            | TEXT    | e.g. `"sympy.solve"`, `"sympy.integrate.doit"` |
-| `success`             | INTEGER | 0/1 — did the tool produce a candidate |
-| `result_repr`         | TEXT    | `sp.srepr` of the candidate (or list of candidates) |
-| `result_pretty`       | TEXT    | human-readable candidate |
-| `verification_status` | TEXT    | `"verified"` \| `"refuted"` \| `"inconclusive"` \| `NULL` |
-| `verification_detail` | TEXT    | one-line explanation of the verifier's decision |
-| `time_ms`             | REAL    | tool wall-time |
-| `error`               | TEXT    | exception message if the tool raised |
-| `steps_json`          | TEXT    | JSON array of step strings emitted by the tool |
-| `created_at`          | TEXT    | ISO timestamp |
+| column                  | type    | notes |
+| ----------------------- | ------- | ----- |
+| `id`                    | INTEGER | primary key |
+| `problem_id`            | INTEGER | FK → `problems.id`, `ON DELETE CASCADE` |
+| `tool`                  | TEXT    | `"sympy"`, `"numeric"`, `"z3"`, `"wolfram"` |
+| `approach`              | TEXT    | e.g. `"sympy.solve"`, `"numeric.fsolve"`, `"z3.solve"` |
+| `success`               | INTEGER | 0/1 — did the tool produce a candidate |
+| `result_repr`           | TEXT    | `sp.srepr` of the candidate (or list of candidates) |
+| `result_pretty`         | TEXT    | human-readable candidate |
+| `verification_status`   | TEXT    | `"verified"` \| `"refuted"` \| `"inconclusive"` \| `NULL` |
+| `verification_detail`   | TEXT    | one-line explanation of the verifier's decision |
+| `cross_verify_tool`     | TEXT    | **Phase 4**: name of the second tool that re-checked |
+| `cross_verify_status`   | TEXT    | `"agree"` \| `"disagree"` \| `"inconclusive"` \| `"unsupported"` \| `NULL` |
+| `cross_verify_detail`   | TEXT    | one-line explanation from the cross-verifier |
+| `cross_verify_time_ms`  | REAL    | wall-time of the cross-verification call |
+| `time_ms`               | REAL    | tool wall-time |
+| `error`                 | TEXT    | exception message if the tool raised |
+| `steps_json`            | TEXT    | JSON array of step strings emitted by the tool |
+| `created_at`            | TEXT    | ISO timestamp |
 
-Indexes: `idx_attempts_problem`, `idx_attempts_tool`.
+Indexes: `idx_attempts_problem`, `idx_attempts_tool`. The four
+`cross_verify_*` columns are populated only when the chosen attempt
+verified *and* `PRU_CROSS_VERIFY=true` *and* the registry found a
+second available tool that can handle the problem.
 
 ## `tool_outcomes`
 
 Aggregated counters keyed on `(signature, tool, approach)`. The Phase 3
-learner reads from this table; Phase 1 writes to it but doesn't use it for
-decisions.
+learner reads from this table to rank candidate approaches via UCB1.
+Phase 4 populates rows for every backend (`sympy`, `numeric`, `z3`,
+`wolfram`).
 
-| column          | type    | notes |
-| --------------- | ------- | ----- |
-| `signature`     | TEXT    | fingerprint signature (see above) |
-| `tool`          | TEXT    | same as `attempts.tool` |
-| `approach`      | TEXT    | same as `attempts.approach` |
-| `n_attempts`    | INTEGER | total invocations on this signature with this approach |
-| `n_success`     | INTEGER | tool returned a candidate |
-| `n_verified`    | INTEGER | verifier returned `"verified"` |
-| `total_time_ms` | REAL    | running sum, for averaging |
-| `updated_at`    | TEXT    | ISO timestamp of the last upsert |
+| column                | type    | notes |
+| --------------------- | ------- | ----- |
+| `signature`           | TEXT    | fingerprint signature (see above) |
+| `tool`                | TEXT    | same as `attempts.tool` |
+| `approach`            | TEXT    | same as `attempts.approach` |
+| `n_attempts`          | INTEGER | total invocations on this signature with this approach |
+| `n_success`           | INTEGER | tool returned a candidate |
+| `n_verified`          | INTEGER | verifier returned `"verified"` |
+| `total_time_ms`       | REAL    | running sum, for averaging |
+| `failure_modes_json`  | TEXT    | **Phase 3**: JSON array of up to 8 most-recent error tags (exception class for tool failures, `verify:refuted` / `verify:inconclusive` for verifier failures) |
+| `updated_at`          | TEXT    | ISO timestamp of the last upsert |
 
 Primary key: `(signature, tool, approach)`. Upserted with
-`ON CONFLICT ... DO UPDATE` so the table is a true aggregate.
+`ON CONFLICT ... DO UPDATE` so the table is a true aggregate. The
+`failure_modes_json` array is read-modify-written inside the same cursor
+as the upsert, so it's atomic with the counter update.
+
+Index: `idx_outcomes_tool_approach` for the dashboard's per-approach
+rollups.
 
 ## Fingerprint JSON schema
 
@@ -157,6 +172,60 @@ operator classes + function flags + normalised counts/degree) and
 computes cosine similarity in one BLAS-backed `scipy.sparse` multiplication.
 Below 200 nodes the simple Python scan is faster, and the sparse path
 falls back to it.
+
+## Tool registry (Phase 4)
+
+Every backend implements the `Tool` ABC in `pru_math/tools/base.py`:
+
+```python
+class Tool(ABC):
+    name: str
+    def is_available(self) -> bool: ...
+    def candidate_approaches(self, problem_type: str) -> Sequence[str]: ...
+    def can_handle(self, fingerprint: dict) -> float: ...    # in [0, 1]
+    def solve_with(self, problem, approach) -> ToolResult: ...
+    def can_cross_verify(self, problem) -> bool: ...
+    def cross_verify(self, problem, candidate) -> CrossVerification: ...
+```
+
+The default registry contains `SymPyTool`, `NumericTool`, `Z3Tool`, and
+`WolframTool`. `is_available()` is consulted once on startup and decides
+whether the tool participates at all; `can_handle(fingerprint)` is
+consulted on every solve and produces the confidence ordering used as
+tiebreak in the learner's rank.
+
+| tool      | available iff                                  | shines at                                |
+| --------- | ---------------------------------------------- | ---------------------------------------- |
+| `sympy`   | always                                         | symbolic algebra, calculus, identities   |
+| `numeric` | always (scipy + numpy + mpmath are required)   | transcendental roots, definite integrals, evalf |
+| `z3`      | `z3-solver` import succeeds                    | polynomial / integer / linear constraints; identity proofs (PROVE) |
+| `wolfram` | `WOLFRAM_APP_ID` is set                        | breadth fallback; opaque text output |
+
+Cross-verification picks the first available *other* tool whose
+`can_cross_verify` returns True for the given problem. The Z3 tool
+overrides `cross_verify` for SOLVE problems with a direct SMT proof
+(substitute each candidate root, assert the residual ≠ 0, expect
+unsat). The Wolfram tool's `can_cross_verify` returns False — its
+opaque text output isn't suitable as a machine-checkable second opinion.
+
+## UCB1 scoring (Phase 3)
+
+For each candidate `(tool, approach)` the learner computes:
+
+    value(c) = n_verified(c) / max(n_attempts(c), 1)
+    bonus(c) = c_explore * sqrt(2 * ln(N + 1) / max(n_attempts(c), 1))
+    score(c) = value(c) + bonus(c)
+
+where `N = max(sum(sig_attempts), sum(type_attempts))` so exploration
+still happens on a brand-new fingerprint when the problem type already
+has history. The exploration constant `c_explore` is configurable via
+`PRU_LEARNER_EXPLORATION` (default 1.0). Falls back to a 50% neutral
+prior when neither sig- nor type-level stats exist for a candidate.
+
+Determinism: ties are broken by lower average time, then by original
+input order (so the registry's confidence sort is respected when scores
+tie), then alphabetically by approach name. Same DB state + same
+candidate set always yields the same rank.
 
 ## Inspecting and editing
 

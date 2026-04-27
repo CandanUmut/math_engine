@@ -5,6 +5,11 @@ Phase 1 / 2 had one approach per problem type. Phase 3 introduces an
 by historical default preference. The :class:`Learner` reorders them per
 fingerprint based on past success.
 
+Phase 4 wraps this module in a :class:`SymPyTool` that participates in the
+multi-tool registry. Module-level helpers (``solve``,
+``solve_with_approach``, ``candidate_approaches``) are kept for callers
+that want SymPy directly without going through the registry.
+
 Each approach is identified by a stable, dotted string name
 (``sympy.solve``, ``sympy.solveset``, ``sympy.integrate.meijerg``, …).
 These strings are written to the ``attempts`` and ``tool_outcomes`` tables
@@ -20,7 +25,7 @@ import sympy as sp
 
 from .. import problem_types as PT
 from ..parser import ParsedProblem
-from .base import ToolResult
+from .base import Tool, ToolResult
 
 
 TOOL_NAME = "sympy"
@@ -345,3 +350,31 @@ def solve(problem: ParsedProblem) -> ToolResult:
     ptype_effective = problem.problem_type if problem.problem_type in APPROACHES else PT.SIMPLIFY
     approaches = APPROACHES[ptype_effective]
     return solve_with_approach(problem, approaches[0].name)
+
+
+# --- Tool registry adapter (Phase 4) ---------------------------------------
+
+
+class SymPyTool(Tool):
+    """Adapter that exposes :mod:`sympy_tool` through the multi-tool registry.
+
+    SymPy is *the* generalist: it knows every problem type, so
+    :meth:`candidate_approaches` is just the module-level table and
+    :meth:`can_handle` always returns 1.0. The reasoner relies on the
+    learner to rank against tools that are stronger on specific shapes
+    (Z3 for SMT-style equations, numeric for transcendental roots, ...).
+    """
+
+    name = TOOL_NAME
+
+    def is_available(self) -> bool:
+        return True
+
+    def candidate_approaches(self, problem_type: str):
+        return list(candidate_approaches(problem_type))
+
+    def can_handle(self, fingerprint):
+        return 1.0
+
+    def solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
+        return solve_with_approach(problem, approach)

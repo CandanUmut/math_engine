@@ -79,7 +79,11 @@ CREATE INDEX IF NOT EXISTS idx_outcomes_tool_approach ON tool_outcomes(tool, app
 # DDL fragment) tuple; ``_init_schema`` issues ALTER TABLE for any column
 # that is missing on existing databases.
 _MIGRATIONS: list[tuple[str, str, str]] = [
-    ("tool_outcomes", "failure_modes_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("tool_outcomes", "failure_modes_json",      "TEXT NOT NULL DEFAULT '[]'"),
+    ("attempts",      "cross_verify_tool",       "TEXT"),
+    ("attempts",      "cross_verify_status",     "TEXT"),
+    ("attempts",      "cross_verify_detail",     "TEXT"),
+    ("attempts",      "cross_verify_time_ms",    "REAL"),
 ]
 
 
@@ -139,6 +143,10 @@ class AttemptRecord:
     error: str | None
     steps: list[str]
     created_at: str
+    cross_verify_tool: str | None = None
+    cross_verify_status: str | None = None
+    cross_verify_detail: str | None = None
+    cross_verify_time_ms: float | None = None
 
 
 class Store:
@@ -240,6 +248,28 @@ class Store:
             )
             return int(cur.lastrowid)
 
+    def update_cross_verify(
+        self,
+        *,
+        attempt_id: int,
+        tool: str,
+        status: str,
+        detail: str | None,
+        time_ms: float,
+    ) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE attempts SET
+                    cross_verify_tool    = ?,
+                    cross_verify_status  = ?,
+                    cross_verify_detail  = ?,
+                    cross_verify_time_ms = ?
+                WHERE id = ?
+                """,
+                (tool, status, detail, float(time_ms), int(attempt_id)),
+            )
+
     def upsert_tool_outcome(
         self,
         *,
@@ -317,6 +347,9 @@ class Store:
         )
 
     def _row_to_attempt(self, row: sqlite3.Row) -> AttemptRecord:
+        keys = row.keys() if hasattr(row, "keys") else []
+        def opt(name: str) -> Any:
+            return row[name] if name in keys else None
         return AttemptRecord(
             id=row["id"],
             problem_id=row["problem_id"],
@@ -331,6 +364,10 @@ class Store:
             error=row["error"],
             steps=json.loads(row["steps_json"] or "[]"),
             created_at=row["created_at"],
+            cross_verify_tool=opt("cross_verify_tool"),
+            cross_verify_status=opt("cross_verify_status"),
+            cross_verify_detail=opt("cross_verify_detail"),
+            cross_verify_time_ms=opt("cross_verify_time_ms"),
         )
 
     def get_problem(self, problem_id: int) -> ProblemRecord | None:
