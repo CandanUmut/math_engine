@@ -32,6 +32,7 @@ class Config:
     similar_top_k: int
     max_attempts: int
     learner_exploration: float
+    cross_verify: bool
 
 
 def load_config() -> Config:
@@ -46,6 +47,7 @@ def load_config() -> Config:
         similar_top_k=int(os.getenv("PRU_SIMILAR_TOP_K", "5")),
         max_attempts=int(os.getenv("PRU_MAX_ATTEMPTS", "3")),
         learner_exploration=float(os.getenv("PRU_LEARNER_EXPLORATION", "1.0")),
+        cross_verify=os.getenv("PRU_CROSS_VERIFY", "false").lower() in {"1", "true", "yes"},
     )
 
 

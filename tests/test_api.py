@@ -70,7 +70,9 @@ def test_attempts_endpoint(client):
     c.post("/solve", json={"text": "Eq(x**2 - 5*x + 6, 0)"})
     r = c.get("/attempts").json()
     assert r["items"]
-    assert r["items"][0]["tool"] == "sympy"
+    # Phase 4: any registered tool may be chosen; just confirm the row carries one.
+    assert r["items"][0]["tool"]
+    assert r["items"][0]["approach"]
 
 
 def test_tool_outcomes_endpoint(client):

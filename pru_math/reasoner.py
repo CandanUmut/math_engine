@@ -1,20 +1,29 @@
 """Reasoner orchestrator.
 
-Phase 3 flow:
+Phase 4 flow:
 
-    parse → fingerprint → retrieval → rank approaches → try (≤budget):
-        tool_call → verify → persist attempt
-        stop early on verified
-    → graph_update → emit trace
+    parse → fingerprint → retrieval → rank approaches (across all tools) →
+        try (≤budget):
+            tool_call → verify → persist attempt
+            stop early on verified
+        → cross_verify (optional, second tool re-checks the answer)
+        → graph_update → emit trace
 
 The decision is grounded in the data: the learner reads ``tool_outcomes``
 from the store, scores every candidate approach with UCB1, and the
 reasoner tries them in that order. Every attempt — successful or not —
 is persisted, and the next solve sees the updated stats.
 
+Phase 4 widens the candidate set from "SymPy approaches only" to "every
+approach from every available tool" via :class:`pru_math.tools.ToolRegistry`.
+Cross-verification re-runs the chosen problem through a *different* tool
+(numeric vs. SymPy, Z3 vs. SymPy, ...) and stores ``agree`` /
+``disagree`` / ``inconclusive`` on the attempt row.
+
 The trace surfaces the candidate table, the chosen approach, every
-intermediate failure, and the stat deltas so a user can audit not just
-"what was the answer" but "why did the system try this first".
+intermediate failure, the stat deltas, and the cross-verification
+outcome so a user can audit not just "what was the answer" but "why did
+the system try this first" and "did a second tool back it up".
 """
 from __future__ import annotations
 
@@ -29,7 +38,8 @@ from .parser import ParseError, ParsedProblem, parse
 from .retrieval import SimilarProblem, find_similar_problems
 from .store import Store
 from .tools import sympy_tool
-from .tools.base import ToolResult
+from .tools.base import CrossVerification, ToolResult
+from .tools.registry import ToolRegistry, default_registry
 from .verifier import VerificationResult, verify
 
 
@@ -38,7 +48,7 @@ class TraceStep:
     """A single step in the reasoning trace, surfaced to the UI."""
 
     kind: str   # parse | fingerprint | retrieval | decision | tool_call |
-                # verify | persist | learn | graph_update
+                # verify | cross_verify | persist | learn | graph_update
     summary: str
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -47,6 +57,7 @@ class TraceStep:
 class AttemptOutcome:
     """One iteration of the multi-attempt loop."""
 
+    tool: str
     approach: str
     success: bool
     result_pretty: str | None
@@ -55,6 +66,9 @@ class AttemptOutcome:
     time_ms: float
     error: str | None
     attempt_id: int | None       # primary key in `attempts` table
+    cross_verify_tool: str | None = None
+    cross_verify_status: str | None = None
+    cross_verify_detail: str | None = None
 
 
 @dataclass
@@ -90,12 +104,18 @@ class Reasoner:
                  store: Store | None = None,
                  graph: RelationalGraph | None = None,
                  learner: Learner | None = None,
-                 max_attempts: int | None = None):
+                 registry: ToolRegistry | None = None,
+                 max_attempts: int | None = None,
+                 cross_verify: bool | None = None):
         self.store = store or Store()
         self.graph = graph or RelationalGraph()
         self.learner = learner or Learner(self.store)
+        self.registry = registry or default_registry()
         self.max_attempts = max(1, max_attempts if max_attempts is not None
                                 else CONFIG.max_attempts)
+        self.cross_verify = (
+            CONFIG.cross_verify if cross_verify is None else bool(cross_verify)
+        )
 
     # -------------------------------------------------------------------
 
@@ -183,28 +203,42 @@ class Reasoner:
             fingerprint=fp,
         )
 
-        # 5. Rank approaches
-        approach_names = sympy_tool.candidate_approaches(parsed.problem_type)
+        # 5. Rank approaches across every available tool.
+        registry_candidates = self.registry.candidates_for(
+            problem_type=parsed.problem_type, fingerprint=fp,
+        )
         candidates: list[tuple[str, str]] = [
-            (sympy_tool.TOOL_NAME, name) for name in approach_names
+            c.to_pair() for c in registry_candidates
         ]
+        # Confidence map so the trace can show what each tool said about
+        # itself before the learner re-ordered them.
+        confidence_map = {(c.tool, c.approach): c.confidence
+                          for c in registry_candidates}
         ranked: list[CandidateStats] = self.learner.rank(
             signature=fp["signature"],
             problem_type=parsed.problem_type,
             candidates=candidates,
         )
-        ranked_names = [r.approach for r in ranked]
         trace.append(TraceStep(
             kind="decision",
             summary=(
-                f"Ranked {len(ranked)} approach(es): "
-                + ", ".join(f"{r.approach} ({r.score:.2f})" for r in ranked[:5])
+                f"Ranked {len(ranked)} approach(es) across "
+                f"{len({c.tool for c in registry_candidates})} tool(s): "
+                + ", ".join(
+                    f"{r.tool}.{r.approach.split('.', 1)[-1]} ({r.score:.2f})"
+                    for r in ranked[:5]
+                )
             ),
             detail={
-                "candidates": [r.to_dict() for r in ranked],
+                "candidates": [
+                    {**r.to_dict(),
+                     "confidence": confidence_map.get((r.tool, r.approach), None)}
+                    for r in ranked
+                ],
                 "policy": "UCB1",
                 "exploration_c": self.learner.exploration_c,
                 "max_attempts": self.max_attempts,
+                "tools_available": [t.name for t in self.registry.available_tools()],
             },
         ))
 
@@ -222,17 +256,9 @@ class Reasoner:
             tool_name = cand.tool
             approach_name = cand.approach
 
-            # Tool call
-            if tool_name == sympy_tool.TOOL_NAME:
-                result = sympy_tool.solve_with_approach(parsed, approach_name)
-            else:
-                # Phase 3 only registers SymPy approaches; this branch is here
-                # so Phase 4 can register additional tools without changing
-                # the loop. Until then, treat unknown tools as a hard fail.
-                result = ToolResult(
-                    tool=tool_name, approach=approach_name, success=False,
-                    error=f"unknown tool: {tool_name}",
-                )
+            result = self.registry.solve_with(
+                tool=tool_name, approach=approach_name, problem=parsed,
+            )
             total_time_ms += result.time_ms
             trace.append(TraceStep(
                 kind="tool_call",
@@ -290,6 +316,7 @@ class Reasoner:
             )
 
             attempts.append(AttemptOutcome(
+                tool=result.tool,
                 approach=result.approach,
                 success=result.success,
                 result_pretty=result.result_pretty or None,
@@ -331,6 +358,53 @@ class Reasoner:
                     if a.verification_status else None
                 )
 
+        # 6b. Cross-verification (Phase 4). Only fires when the chosen
+        #     attempt verified — there's no point cross-checking a refuted
+        #     or inconclusive answer.
+        if (
+            self.cross_verify
+            and chosen_idx is not None
+            and chosen_result is not None
+            and chosen_verification
+            and chosen_verification.status == "verified"
+        ):
+            second_tool = self.registry.pick_cross_verifier(
+                primary_tool=chosen_result.tool, problem=parsed,
+            )
+            if second_tool is None:
+                trace.append(TraceStep(
+                    kind="cross_verify",
+                    summary="Cross-verify enabled but no second tool can handle this problem.",
+                    detail={"primary_tool": chosen_result.tool},
+                ))
+            else:
+                cv: CrossVerification = second_tool.cross_verify(
+                    parsed, chosen_result.result,
+                )
+                trace.append(TraceStep(
+                    kind="cross_verify",
+                    summary=f"Cross-checked with {cv.tool}: {cv.status}"
+                            + (f" — {cv.detail}" if cv.detail else ""),
+                    detail={
+                        "primary_tool": chosen_result.tool,
+                        "primary_approach": chosen_result.approach,
+                        "tool": cv.tool,
+                        "status": cv.status,
+                        "detail": cv.detail,
+                        "time_ms": cv.time_ms,
+                    },
+                ))
+                if chosen_attempt_id is not None:
+                    self.store.update_cross_verify(
+                        attempt_id=chosen_attempt_id,
+                        tool=cv.tool, status=cv.status,
+                        detail=cv.detail or None, time_ms=cv.time_ms,
+                    )
+                if chosen_idx is not None:
+                    attempts[chosen_idx].cross_verify_tool = cv.tool
+                    attempts[chosen_idx].cross_verify_status = cv.status
+                    attempts[chosen_idx].cross_verify_detail = cv.detail or None
+
         trace.append(TraceStep(
             kind="persist",
             summary=f"Stored {len(attempts)} attempt(s) on problem_id={problem_id}",
@@ -370,7 +444,7 @@ class Reasoner:
         for a in attempts:
             self.graph.link_solved_by(
                 problem_id=problem_id,
-                tool=sympy_tool.TOOL_NAME,
+                tool=a.tool,
                 approach=a.approach,
                 success=a.success,
                 verified=a.verification_status == "verified",

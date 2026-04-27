@@ -198,10 +198,16 @@ class Learner:
         candidates: Iterable[tuple[str, str]],
     ) -> list[CandidateStats]:
         """Return the candidates sorted by descending UCB score. Ties are
-        broken first by lower average time (faster wins), then by approach
-        name (stable, deterministic)."""
+        broken first by lower average time (faster wins), then by the
+        original input order (so callers that pass candidates ordered by
+        a meaningful prior — e.g. tool self-confidence — see that prior
+        respected when statistics are absent), then by approach name."""
+        cand_list = list(candidates)
+        order_index: dict[tuple[str, str], int] = {
+            pair: i for i, pair in enumerate(cand_list)
+        }
         stats = self.stats_for(
-            signature=signature, problem_type=problem_type, candidates=candidates,
+            signature=signature, problem_type=problem_type, candidates=cand_list,
         )
         # The exploration bonus scales with ln(N), where N is the total number
         # of observations across candidates. We use the larger of the
@@ -213,5 +219,10 @@ class Learner:
         )
         for s in stats:
             self._score(s, n_total)
-        stats.sort(key=lambda s: (-s.score, s.avg_time_ms, s.approach))
+        stats.sort(key=lambda s: (
+            -s.score,
+            s.avg_time_ms,
+            order_index.get((s.tool, s.approach), 10_000),
+            s.approach,
+        ))
         return stats
