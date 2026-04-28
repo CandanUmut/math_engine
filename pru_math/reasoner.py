@@ -111,7 +111,9 @@ class Reasoner:
                  hypothesizer: Any | None = None):
         self.store = store or Store()
         self.graph = graph or RelationalGraph()
-        self.learner = learner or Learner(self.store)
+        # Phase 7: pass the graph to the Learner so it can read verified
+        # rule nodes and add a small identity-aware bonus.
+        self.learner = learner or Learner(self.store, graph=self.graph)
         self.registry = registry or default_registry()
         # Phase 6: explicit constructor overrides win; otherwise we read
         # from runtime settings on every solve so a PUT /config flip

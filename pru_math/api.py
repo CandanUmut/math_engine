@@ -97,7 +97,7 @@ def create_app(store: Store | None = None,
                hypothesizer: Hypothesizer | None = None) -> FastAPI:
     store = store or Store()
     graph = graph or RelationalGraph()
-    learner = learner or Learner(store)
+    learner = learner or Learner(store, graph=graph)
     registry = registry or default_registry()
     hypothesizer = hypothesizer or Hypothesizer(store=store, graph=graph)
     reasoner = Reasoner(store=store, graph=graph, learner=learner,

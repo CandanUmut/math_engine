@@ -17,9 +17,11 @@ See `PHILOSOPHY.md` for the longer version, and `SCHEMA.md` for the data model.
 
 ## Status
 
-The five planned phases are feature-complete; **Phase 6** added the
-operational hardening that turns a demo into a tool you can leave
-running.
+The five planned phases plus operational hardening (Phase 6) are
+feature-complete. **Phase 7** closed the loop between the hypothesizer
+and the learner: verified rules now influence future ranking, identity
+chaining proposes new identities from existing ones, and "hard"
+signature classes get flagged with their working fallback.
 
 | Phase | Scope                                                       | State  |
 | ----- | ----------------------------------------------------------- | ------ |
@@ -29,6 +31,7 @@ running.
 | 4     | Multi-tool orchestration (numeric · Z3 · Wolfram)           | **done** |
 | 5     | Hypothesis generation · identity discovery                  | **done** |
 | 6     | Operational hardening (timeouts, settings, export, autoscan)| **done** |
+| 7     | Reasoning quality (identity-aware ranking, transitivity)    | **done** |
 
 The Phase 5 success criterion — "the system has proposed and verified at
 least one identity or shortcut that was not explicitly given to it" —
@@ -81,6 +84,16 @@ with `uses_rule` edges back to the supporting problems.
 - **Self-confidence as tiebreak**: each tool's `can_handle(fingerprint)` returns a confidence in `[0, 1]`. The registry sorts candidates by confidence; the learner uses original input order as a deterministic tiebreaker so a cold-start problem prefers the high-confidence tool's approach.
 - **`GET /tools`** lists every registered tool with its availability and class name.
 - **End-to-end**: with the default registry (SymPy + numeric + Z3, Wolfram unavailable), `Integral(x**2, (x, 0, 1))` is solved by SymPy and cross-verified `agree` by numeric quadrature; quadratics are solved by `sympy.roots` and cross-verified by either numeric or Z3 depending on which is picked first.
+
+### What Phase 7 adds
+
+The hypothesizer's discoveries no longer sit passively in the graph —
+they influence the next solve.
+
+- **Identity-aware ranking** (`pru_math/rules.py`). The Learner now optionally takes a `RelationalGraph` reference. On every rank, it walks the graph from the current problem's signature node out to any verified `rule` nodes (`r:hyp_*`) and counts how many `(tool, approach)` witnesses each candidate has on supporting problems. Each witness adds a small bonus (`PRU_LEARNER_RULE_BONUS=0.05`, capped at `0.30`) on top of the UCB score, surfaced as `rule_bonus` and `rule_witnesses` in `CandidateStats` and the `decision` trace step's rationale. Verification rate stays the dominant term — rules just nudge the engine toward approaches that have been part of an identity chain on similar problems.
+- **Transitive identity detector** (`Hypothesizer.detect_transitive_identities`). For every pair of verified `A ≡ B` and `B ≡ C` whose canonical bridge form lines up, the engine proposes `A ≡ C` and runs it through the same SymPy / numeric / Z3 verifier. Carries `derived_from: [parent_id_1, parent_id_2]` in its evidence so the chain is auditable.
+- **Hard-signature detector** (`Hypothesizer.detect_hard_signatures`). For each signature class with at least 3 verified problems and an average `> 1.5` attempts-until-verified, propose a "fallback chain" hypothesis recording the most-frequently-winning `(tool, approach)`. Reuses the recurring-approach kind so the existing stat-verifier handles it. This makes "this signature is harder than usual; here's what works" a first-class output of the engine.
+- **Auto-merge of derived hypotheses**: every detector goes through the same `upsert_hypothesis` path keyed on the deterministic fingerprint, so re-scans (including the auto-scan loop) merge new evidence into existing rows without duplicating.
 
 ### What Phase 6 adds
 
@@ -194,6 +207,7 @@ translates language into a SymPy-parseable expression. See
 | `pru_math/tools/timeout.py`         | **Phase 6** — `run_with_timeout` wrapper enforcing `PRU_TOOL_TIMEOUT_S` |
 | `pru_math/settings.py`              | **Phase 6** — layered runtime config, persistent JSON overrides |
 | `pru_math/exporter.py`              | **Phase 6** — single-bundle DB + graph export / atomic import |
+| `pru_math/rules.py`                 | **Phase 7** — graph traversal from a fingerprint to verified-rule witnesses |
 | `pru_math/tools/numeric_tool.py`    | **Phase 4** — scipy / mpmath fallback (`numeric.fsolve`, `numeric.brentq`, `numeric.quad`, `numeric.evalf`) |
 | `pru_math/tools/z3_tool.py`         | **Phase 4** — Z3 SMT backend with SymPy→Z3 translator (graceful when missing) |
 | `pru_math/tools/wolfram_tool.py`    | **Phase 4** — optional HTTP backend, gated by `WOLFRAM_APP_ID` |
@@ -208,7 +222,7 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-147 tests covering the parser (three formats), fingerprint determinism
+155 tests covering the parser (three formats), fingerprint determinism
 and similarity, SymPy tool dispatch for every supported problem type,
 the verifier against correct and wrong candidates, the SQLite store,
 the graph (node/edge add, similarity edges, persistence round-trip,
