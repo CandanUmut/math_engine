@@ -139,6 +139,11 @@ class Hypothesizer:
         proposals.extend(self.detect_specializations())
         proposals.extend(self.detect_recurring_approaches())
         proposals.extend(self.detect_identities())
+        # Phase 7: derived-from-existing detectors. They read from the
+        # already-verified hypotheses and only fire on second / later
+        # scans, which is fine — scan() is idempotent and merges.
+        proposals.extend(self.detect_transitive_identities())
+        proposals.extend(self.detect_hard_signatures())
 
         out: list[Hypothesis] = []
         for h in proposals:
@@ -338,6 +343,164 @@ class Hypothesizer:
                     claim=claim, claim_repr=claim_repr,
                     evidence=evidence,
                 ))
+        return out
+
+    def detect_transitive_identities(self) -> list[Hypothesis]:
+        """Phase 7: from verified ``A ≡ B`` and ``B ≡ C`` propose ``A ≡ C``.
+
+        Two identities chain when one's RHS is the other's LHS *after*
+        canonicalisation. The proposed claim re-uses the same canonical
+        form on both sides so the verifier picks it up via the same
+        :func:`_verify_identity` path the original detector uses.
+        """
+        verified = [
+            h for h in self.store.list_hypotheses(status=STATUS_VERIFIED, kind=KIND_IDENTITY)
+        ]
+        if len(verified) < 2:
+            return []
+        # Index each identity by canonical form on both sides.
+        by_canon: dict[str, list[tuple[HypothesisRecord, str, str]]] = {}
+        # Each entry is (record, lhs_pretty, rhs_pretty).
+        for h in verified:
+            ev = h.evidence or {}
+            lhs = ev.get("lhs_pretty")
+            rhs = ev.get("rhs_pretty")
+            if not lhs or not rhs:
+                continue
+            lhs_canon = _canonical(lhs)
+            rhs_canon = _canonical(rhs)
+            if not lhs_canon or not rhs_canon:
+                continue
+            by_canon.setdefault(lhs_canon, []).append((h, lhs, rhs))
+            # Also index by RHS so we can match either direction.
+            by_canon.setdefault(rhs_canon, []).append((h, rhs, lhs))
+
+        out: list[Hypothesis] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for canon, entries in by_canon.items():
+            if len(entries) < 2:
+                continue
+            for i in range(len(entries)):
+                for j in range(i + 1, len(entries)):
+                    h1, _bridge1, other1 = entries[i]
+                    h2, _bridge2, other2 = entries[j]
+                    if h1.id == h2.id:
+                        continue
+                    if other1 == other2:
+                        continue   # same identity from both directions
+                    pair_key = tuple(sorted([other1, other2]))
+                    if pair_key in seen_pairs:
+                        continue
+                    seen_pairs.add(pair_key)
+                    lhs_repr = _canonical(other1) or other1
+                    rhs_repr = _canonical(other2) or other2
+                    if lhs_repr == rhs_repr:
+                        # Already trivially equal — skip rather than re-propose.
+                        continue
+                    sup_a = (h1.evidence or {}).get("support_problem_ids") or []
+                    sup_b = (h2.evidence or {}).get("support_problem_ids") or []
+                    evidence = {
+                        "lhs_pretty": other1,
+                        "rhs_pretty": other2,
+                        "derived_from": [h1.id, h2.id],
+                        "bridge_canonical": canon[:60] + ("…" if len(canon) > 60 else ""),
+                        "support_problem_ids": sorted(set(sup_a) | set(sup_b)),
+                    }
+                    claim = f"(transitive) {other1}  ≡  {other2}"
+                    sorted_repr = sorted([lhs_repr, rhs_repr])
+                    claim_repr = f"identity:{sorted_repr[0]}<=>{sorted_repr[1]}"
+                    out.append(Hypothesis(
+                        kind=KIND_IDENTITY,
+                        claim=claim, claim_repr=claim_repr,
+                        evidence=evidence,
+                    ))
+                    if len(out) >= 30:
+                        return out
+        return out
+
+    def detect_hard_signatures(self) -> list[Hypothesis]:
+        """Phase 7: signatures that reliably need *more than one* attempt
+        before something verifies — those are exactly where the
+        multi-attempt fallback chain matters, and where the engine should
+        flag the working sequence so a future operator can read it.
+
+        We classify a signature as "hard" when:
+
+        - at least 3 problems share that signature, AND
+        - the average number of attempts before a verified result is > 1.5
+
+        The hypothesis records which approach finally verified, so the
+        learner can pick it up via its existing recurring-approach
+        bonus path.
+        """
+        with self.store._cursor() as cur:   # noqa: SLF001
+            rows = cur.execute(
+                """
+                SELECT p.signature AS sig, p.id AS pid, a.id AS aid,
+                       a.tool AS tool, a.approach AS approach,
+                       a.verification_status AS status
+                FROM attempts a
+                JOIN problems p ON p.id = a.problem_id
+                ORDER BY a.id ASC
+                """,
+            ).fetchall()
+        # Group attempts by problem in order, so we can count "attempts
+        # until verified" per problem.
+        per_problem: dict[int, list[dict[str, str]]] = {}
+        sig_of: dict[int, str] = {}
+        for r in rows:
+            pid = int(r["pid"])
+            sig_of[pid] = r["sig"]
+            per_problem.setdefault(pid, []).append({
+                "tool": r["tool"], "approach": r["approach"],
+                "status": r["status"] or "",
+            })
+        # Aggregate per signature.
+        per_sig: dict[str, list[tuple[int, str, str]]] = {}
+        for pid, attempts in per_problem.items():
+            verified_idx = next(
+                (i for i, a in enumerate(attempts) if a["status"] == "verified"),
+                None,
+            )
+            if verified_idx is None:
+                continue
+            attempts_until = verified_idx + 1
+            winning = attempts[verified_idx]
+            per_sig.setdefault(sig_of[pid], []).append(
+                (attempts_until, winning["tool"], winning["approach"])
+            )
+        out: list[Hypothesis] = []
+        for sig, recs in per_sig.items():
+            if len(recs) < 3:
+                continue
+            avg_attempts = sum(r[0] for r in recs) / len(recs)
+            if avg_attempts <= 1.5:
+                continue
+            # Pick the most-frequent winning (tool, approach) on this sig.
+            pair_counts: dict[tuple[str, str], int] = {}
+            for _, tool, approach in recs:
+                pair_counts[(tool, approach)] = pair_counts.get((tool, approach), 0) + 1
+            best_pair, best_n = max(pair_counts.items(), key=lambda kv: kv[1])
+            best_tool, best_approach = best_pair
+            evidence = {
+                "signature": sig,
+                "n_problems": len(recs),
+                "avg_attempts_until_verified": round(avg_attempts, 2),
+                "winning_pair": {"tool": best_tool, "approach": best_approach,
+                                 "wins": best_n},
+            }
+            claim = (
+                f"Signature {sig[:8]} is hard "
+                f"(avg {avg_attempts:.1f} attempts); "
+                f"prefer {best_approach} as a fallback"
+            )
+            claim_repr = f"hard_signature:{sig}->{best_tool}.{best_approach}"
+            out.append(Hypothesis(
+                kind=KIND_RECURRING,   # reuse the same kind so the verifier
+                                        # already handles it (stat-based)
+                claim=claim, claim_repr=claim_repr,
+                evidence={**evidence, "leader": evidence["winning_pair"]},
+            ))
         return out
 
     def verify(self, h: Hypothesis) -> Hypothesis:

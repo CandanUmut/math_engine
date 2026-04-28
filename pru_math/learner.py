@@ -34,7 +34,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 from .store import Store, ToolOutcomeRecord
 
@@ -43,6 +43,14 @@ from .store import Store, ToolOutcomeRecord
 _EXPLORATION_C = float(os.getenv("PRU_LEARNER_EXPLORATION", "1.0"))
 _NEUTRAL_PRIOR = 0.5      # used when neither sig nor type-level stats exist
 _PRIOR_PSEUDO_N = 1.0     # weight given to the prior in the bonus term
+
+# Phase 7: identity-aware ranking. Every verified-rule witness on a
+# similar problem adds ``_RULE_BONUS_PER_WITNESS`` to the score, capped
+# at ``_RULE_BONUS_CAP``. The bonus is a small, transparent nudge —
+# verify rate stays the dominant term — but it closes the loop between
+# the hypothesizer's discoveries and the next solve's ranking.
+_RULE_BONUS_PER_WITNESS = float(os.getenv("PRU_LEARNER_RULE_BONUS", "0.05"))
+_RULE_BONUS_CAP = float(os.getenv("PRU_LEARNER_RULE_BONUS_CAP", "0.30"))
 
 
 @dataclass
@@ -63,6 +71,8 @@ class CandidateStats:
     # Computed scoring fields (filled by Learner.rank)
     value: float = _NEUTRAL_PRIOR
     bonus: float = 0.0
+    rule_bonus: float = 0.0      # Phase 7: identity-aware nudge
+    rule_witnesses: int = 0       # how many witnesses contributed
     score: float = _NEUTRAL_PRIOR
     rationale: str = ""
 
@@ -95,6 +105,8 @@ class CandidateStats:
             "verify_rate": round(self.verify_rate, 4),
             "value": round(self.value, 4),
             "bonus": round(self.bonus, 4),
+            "rule_bonus": round(self.rule_bonus, 4),
+            "rule_witnesses": self.rule_witnesses,
             "score": round(self.score, 4),
             "failure_modes": list(self.failure_modes),
             "rationale": self.rationale,
@@ -103,10 +115,20 @@ class CandidateStats:
 
 class Learner:
     """Read-only ranker. Keeps no in-memory state — it queries the store
-    every time so it always reflects the latest writes."""
+    every time so it always reflects the latest writes.
 
-    def __init__(self, store: Store, *, exploration_c: float | None = None):
+    Phase 7: optionally accepts a :class:`RelationalGraph` so the
+    ranking includes a small **identity-aware bonus** for approaches
+    that have witnessed verified rules on problems sharing the current
+    signature. The bonus is capped and transparent — it shows up as
+    ``rule_bonus`` and ``rule_witnesses`` in :class:`CandidateStats`.
+    """
+
+    def __init__(self, store: Store, *,
+                 exploration_c: float | None = None,
+                 graph: Any | None = None):
         self.store = store
+        self.graph = graph
         self.exploration_c = (
             _EXPLORATION_C if exploration_c is None else float(exploration_c)
         )
@@ -150,7 +172,9 @@ class Learner:
 
     # --- Scoring --------------------------------------------------------
 
-    def _score(self, c: CandidateStats, n_total_at_sig: int) -> None:
+    def _score(self, c: CandidateStats, n_total_at_sig: int,
+               *, rule_witnesses: dict[tuple[str, str], int] | None = None
+               ) -> None:
         # Pick the level with data.
         if c.sig_attempts > 0:
             value = c.sig_verified / c.sig_attempts
@@ -170,24 +194,38 @@ class Learner:
         n_eff = max(n_total_at_sig, 1)
         bonus = self.exploration_c * math.sqrt(2.0 * math.log(n_eff + 1) / n)
 
+        # Phase 7: identity-aware bonus (capped). Looks up how many
+        # verified-rule witnesses on similar problems voted for this
+        # (tool, approach) pair.
+        witnesses = 0
+        if rule_witnesses:
+            witnesses = int(rule_witnesses.get((c.tool, c.approach), 0))
+        rule_bonus = min(_RULE_BONUS_CAP, _RULE_BONUS_PER_WITNESS * witnesses)
+
         c.value = float(value)
         c.bonus = float(bonus)
-        c.score = c.value + c.bonus
+        c.rule_bonus = float(rule_bonus)
+        c.rule_witnesses = int(witnesses)
+        c.score = c.value + c.bonus + c.rule_bonus
 
+        suffix = ""
+        if witnesses:
+            suffix = f"; rule witnesses ×{witnesses} (+{rule_bonus:.2f})"
         if level == "sig":
             c.rationale = (
                 f"sig {c.sig_verified}/{c.sig_attempts} verified "
-                f"({c.value:.0%}) + UCB bonus {c.bonus:.2f}"
+                f"({c.value:.0%}) + UCB bonus {c.bonus:.2f}{suffix}"
             )
         elif level == "type":
             c.rationale = (
                 f"type {c.type_verified}/{c.type_attempts} verified "
                 f"({c.value:.0%}); never seen at this signature; "
-                f"+ UCB bonus {c.bonus:.2f}"
+                f"+ UCB bonus {c.bonus:.2f}{suffix}"
             )
         else:
             c.rationale = (
                 f"unseen — neutral prior {c.value:.0%} + UCB bonus {c.bonus:.2f}"
+                f"{suffix}"
             )
 
     def rank(
@@ -217,8 +255,12 @@ class Learner:
             sum(s.sig_attempts for s in stats),
             sum(s.type_attempts for s in stats),
         )
+        # Phase 7: identity-aware nudge. Rule-witness counts come from
+        # the graph; without a graph reference (e.g. tests that don't
+        # need it) we just skip this and the rank reduces to plain UCB.
+        rule_witnesses = self._rule_witnesses(signature)
         for s in stats:
-            self._score(s, n_total)
+            self._score(s, n_total, rule_witnesses=rule_witnesses)
         stats.sort(key=lambda s: (
             -s.score,
             s.avg_time_ms,
@@ -226,3 +268,14 @@ class Learner:
             s.approach,
         ))
         return stats
+
+    def _rule_witnesses(self, signature: str) -> dict[tuple[str, str], int]:
+        if self.graph is None or not signature:
+            return {}
+        try:
+            from .rules import witness_counts
+            return witness_counts(self.graph, signature)
+        except Exception:
+            # Don't let a graph-traversal bug crash the reasoner; just
+            # skip the bonus and continue.
+            return {}
