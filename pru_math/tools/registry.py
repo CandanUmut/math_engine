@@ -96,14 +96,20 @@ class ToolRegistry:
         self, *, primary_tool: str, problem: ParsedProblem,
     ) -> Tool | None:
         """Pick a different available tool that can cross-check ``primary_tool``'s
-        result for this problem. Prefers tools whose ``can_cross_verify``
-        returns True; returns ``None`` when no second opinion is available."""
-        for t in self.available_tools():
-            if t.name == primary_tool:
-                continue
-            if t.can_cross_verify(problem):
-                return t
-        return None
+        result for this problem.
+
+        Phase 6: candidates are sorted by ``cross_verify_priority``
+        (descending), so Z3 (proof) beats numeric (empirical agreement)
+        beats SymPy (symbolic re-derivation). Ties are broken by tool
+        name for determinism."""
+        eligible = [
+            t for t in self.available_tools()
+            if t.name != primary_tool and t.can_cross_verify(problem)
+        ]
+        if not eligible:
+            return None
+        eligible.sort(key=lambda t: (-int(t.cross_verify_priority), t.name))
+        return eligible[0]
 
     # --- Inspection ----------------------------------------------------
 

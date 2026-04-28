@@ -36,6 +36,7 @@ from .graph import RelationalGraph
 from .learner import CandidateStats, Learner
 from .parser import ParseError, ParsedProblem, parse
 from .retrieval import SimilarProblem, find_similar_problems
+from . import settings as runtime_settings
 from .store import Store
 from .tools import sympy_tool
 from .tools.base import CrossVerification, ToolResult
@@ -106,16 +107,34 @@ class Reasoner:
                  learner: Learner | None = None,
                  registry: ToolRegistry | None = None,
                  max_attempts: int | None = None,
-                 cross_verify: bool | None = None):
+                 cross_verify: bool | None = None,
+                 hypothesizer: Any | None = None):
         self.store = store or Store()
         self.graph = graph or RelationalGraph()
         self.learner = learner or Learner(self.store)
         self.registry = registry or default_registry()
-        self.max_attempts = max(1, max_attempts if max_attempts is not None
-                                else CONFIG.max_attempts)
-        self.cross_verify = (
-            CONFIG.cross_verify if cross_verify is None else bool(cross_verify)
-        )
+        # Phase 6: explicit constructor overrides win; otherwise we read
+        # from runtime settings on every solve so a PUT /config flip
+        # takes effect immediately.
+        self._explicit_max_attempts = max_attempts
+        self._explicit_cross_verify = cross_verify
+        # Phase 6 also threads in the hypothesizer for auto-scan, lazily
+        # created on first use so a Reasoner without a hypothesizer dep
+        # still works (test suites often pass none).
+        self._hypothesizer = hypothesizer
+        self._solves_since_scan = 0
+
+    @property
+    def max_attempts(self) -> int:
+        if self._explicit_max_attempts is not None:
+            return max(1, int(self._explicit_max_attempts))
+        return max(1, int(runtime_settings.get("max_attempts")))
+
+    @property
+    def cross_verify(self) -> bool:
+        if self._explicit_cross_verify is not None:
+            return bool(self._explicit_cross_verify)
+        return bool(runtime_settings.get("cross_verify"))
 
     # -------------------------------------------------------------------
 
@@ -162,7 +181,7 @@ class Reasoner:
 
         # 3. Retrieval
         similar: list[SimilarProblem] = find_similar_problems(
-            fp, graph=self.graph, store=self.store, k=CONFIG.similar_top_k,
+            fp, graph=self.graph, store=self.store, k=runtime_settings.get("similar_top_k"),
         )
         if similar:
             top_summary = ", ".join(
@@ -172,7 +191,7 @@ class Reasoner:
                 kind="retrieval",
                 summary=f"Found {len(similar)} similar past problem(s): {top_summary}",
                 detail={
-                    "k": CONFIG.similar_top_k,
+                    "k": runtime_settings.get("similar_top_k"),
                     "neighbours": [
                         {
                             "problem_id": s.problem.id,
@@ -190,7 +209,7 @@ class Reasoner:
             trace.append(TraceStep(
                 kind="retrieval",
                 summary="No similar past problems yet — first of its kind in the graph.",
-                detail={"k": CONFIG.similar_top_k, "neighbours": []},
+                detail={"k": runtime_settings.get("similar_top_k"), "neighbours": []},
             ))
 
         # 4. Persist the problem (before any tool call so failures are recorded)
@@ -467,6 +486,11 @@ class Reasoner:
             },
         ))
 
+        # Phase 6: auto-scan. When auto_scan_every_n > 0 and we've crossed
+        # the threshold, run the hypothesizer in-process and surface a
+        # trace step so the user sees what was discovered.
+        self._maybe_autoscan(trace)
+
         # Final outcome
         if chosen_result is None:
             return SolveOutcome(
@@ -551,3 +575,54 @@ class Reasoner:
             arrow = "↑" if j < i else "↓"
             out.append(f"{c.approach} {i+1}→{j+1} {arrow}")
         return out
+
+    # --- Auto-scan (Phase 6) -------------------------------------------
+
+    def _ensure_hypothesizer(self) -> Any | None:
+        """Lazily create a Hypothesizer the first time auto-scan needs it.
+        Imported here to avoid a hard module-level cycle (hypothesizer
+        imports verifier, which is fine; reasoner importing hypothesizer
+        creates a needless dependency for users who don't auto-scan)."""
+        if self._hypothesizer is None:
+            try:
+                from .hypothesizer import Hypothesizer
+                self._hypothesizer = Hypothesizer(store=self.store, graph=self.graph)
+            except Exception:
+                return None
+        return self._hypothesizer
+
+    def _maybe_autoscan(self, trace: list[TraceStep]) -> None:
+        try:
+            every_n = int(runtime_settings.get("auto_scan_every_n"))
+        except Exception:
+            every_n = 0
+        if every_n <= 0:
+            return
+        self._solves_since_scan += 1
+        if self._solves_since_scan < every_n:
+            return
+        self._solves_since_scan = 0
+        h = self._ensure_hypothesizer()
+        if h is None:
+            return
+        try:
+            results = h.scan(verify=True)
+        except Exception as exc:
+            trace.append(TraceStep(
+                kind="auto_scan",
+                summary=f"auto-scan failed: {type(exc).__name__}: {exc}",
+                detail={"every_n": every_n},
+            ))
+            return
+        verified = [r for r in results if r.status == "verified"]
+        trace.append(TraceStep(
+            kind="auto_scan",
+            summary=(
+                f"auto-scan: {len(results)} hypothesis(es), "
+                f"{len(verified)} verified"
+            ),
+            detail={
+                "every_n": every_n,
+                "items": [r.to_dict() for r in results[:8]],
+            },
+        ))

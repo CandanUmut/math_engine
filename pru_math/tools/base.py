@@ -4,6 +4,12 @@ Phase 4 introduces the multi-tool registry. Each backend (SymPy, numeric,
 Z3, Wolfram) implements :class:`Tool`; the reasoner asks the registry for
 the candidate ``(tool_name, approach_name)`` pairs and the learner ranks
 them across tools, not just within SymPy.
+
+Phase 6 wraps every tool call in a wall-clock budget enforced by
+:mod:`pru_math.tools.timeout`. Subclasses don't have to do anything —
+the base ``solve_with`` does the wrapping and turns timeouts into
+ordinary failed :class:`ToolResult` rows so the learner records them
+as a failure mode like any other error.
 """
 from __future__ import annotations
 
@@ -83,10 +89,42 @@ class Tool(ABC):
         rules ("if polynomial degree > 0, I can probably solve it")."""
         return 0.5
 
-    @abstractmethod
+    # Phase 6: per-tool wall-clock budget. ``0`` or ``None`` disables
+    # the timeout for this tool (e.g. some tests want to opt out).
+    timeout_s: float | None = None
+
+    # Phase 6: priority used by the registry to pick a *cross-verifier*
+    # — higher wins. Subclasses override; default is neutral.
+    cross_verify_priority: int = 0
+
     def solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
-        """Run a specific approach. Captures timing, errors, and steps and
-        returns a :class:`ToolResult` regardless of whether it succeeded."""
+        """Run a specific approach with the per-tool wall-clock budget.
+
+        Subclasses implement :meth:`_solve_with`; this wrapper enforces
+        the budget and turns any :class:`ToolTimeoutError` into a normal
+        failed :class:`ToolResult` (so the learner records it like any
+        other failure mode).
+        """
+        from .timeout import ToolTimeoutError, run_with_timeout
+        from ..config import CONFIG
+        budget = self.timeout_s if self.timeout_s is not None else CONFIG.tool_timeout_s
+        if budget is None or budget <= 0:
+            return self._solve_with(problem, approach)
+        try:
+            return run_with_timeout(self._solve_with, budget, problem, approach)
+        except ToolTimeoutError as exc:
+            return ToolResult(
+                tool=self.name, approach=approach, success=False,
+                time_ms=float(budget) * 1000.0,
+                error=f"ToolTimeoutError: {exc}",
+                meta={"timeout_s": float(budget),
+                      "problem_type": problem.problem_type},
+            )
+
+    @abstractmethod
+    def _solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
+        """The actual tool work. Subclasses implement this; callers go
+        through :meth:`solve_with` so the timeout is enforced uniformly."""
 
     # --- Cross-verification (optional) --------------------------------
 

@@ -686,6 +686,129 @@ async function refreshInsights() {
   }
 }
 
+/* ── Settings modal (Phase 6) ─────────────────────────────────────── */
+
+const SETTING_TYPES = {
+  max_attempts:         "int",
+  similar_top_k:        "int",
+  auto_scan_every_n:    "int",
+  learner_exploration:  "float",
+  similarity_threshold: "float",
+  tool_timeout_s:       "float",
+  cross_verify:         "bool",
+  ollama_enabled:       "bool",
+  ollama_model:         "str",
+};
+
+async function openSettings() {
+  const data = await fetch("/config").then((r) => r.json());
+  const form = $("settings-form");
+  const keys = data.settable_keys || Object.keys(SETTING_TYPES);
+  form.innerHTML = keys.map((k) => {
+    const t = SETTING_TYPES[k] || "str";
+    const v = data[k];
+    if (t === "bool") {
+      const checked = v ? "checked" : "";
+      return `<label>${escapeHtml(k)}
+        <input type="checkbox" data-key="${k}" data-type="bool" ${checked}/>
+      </label>`;
+    }
+    return `<label>${escapeHtml(k)}
+      <input data-key="${k}" data-type="${t}" value="${escapeHtml(String(v ?? ""))}"/>
+    </label>`;
+  }).join("");
+  $("settings-status").textContent = "";
+  $("settings-modal").hidden = false;
+}
+
+function closeSettings() {
+  $("settings-modal").hidden = true;
+}
+
+async function saveSettings() {
+  const fields = $("settings-form").querySelectorAll("[data-key]");
+  const updates = {};
+  fields.forEach((el) => {
+    const k = el.dataset.key;
+    const t = el.dataset.type;
+    if (t === "bool") updates[k] = el.checked;
+    else if (t === "int") updates[k] = parseInt(el.value, 10);
+    else if (t === "float") updates[k] = parseFloat(el.value);
+    else updates[k] = el.value;
+  });
+  $("settings-status").textContent = "saving…";
+  try {
+    const r = await fetch("/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    if (!r.ok) {
+      const msg = await r.text();
+      throw new Error(`HTTP ${r.status}: ${msg}`);
+    }
+    $("settings-status").textContent = "saved.";
+    setTimeout(closeSettings, 600);
+    refreshStats();
+  } catch (err) {
+    $("settings-status").textContent = "save failed: " + err.message;
+  }
+}
+
+async function resetSettings() {
+  if (!confirm("Revert every setting to the env-loaded defaults?")) return;
+  await fetch("/config/reset", { method: "POST" });
+  await openSettings();
+}
+
+/* ── Database export / import (Phase 6) ──────────────────────────── */
+
+async function exportDb() {
+  try {
+    const r = await fetch("/db/export");
+    const data = await r.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)],
+                          { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `pru-math-export-${stamp}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert("export failed: " + err.message);
+  }
+}
+
+function importDbFile(file) {
+  if (!file) return;
+  if (!confirm(`Replace the entire database with ${file.name}? This cannot be undone.`)) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const body = JSON.parse(reader.result);
+      const r = await fetch("/db/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const msg = await r.text();
+        throw new Error(`HTTP ${r.status}: ${msg}`);
+      }
+      const out = await r.json();
+      alert(`imported: ${JSON.stringify(out.counts)}`);
+      refreshStats();
+      refreshRecent();
+      if (currentDbView) loadDbTable(currentDbView);
+    } catch (err) {
+      alert("import failed: " + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
 /* ── Hypotheses tab (Phase 5) ─────────────────────────────────────── */
 
 async function refreshHypotheses() {
@@ -812,6 +935,21 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("trace-collapse")?.addEventListener("click", () => {
     if (traceList) traceList.querySelectorAll("details").forEach((d) => (d.open = false));
+  });
+
+  // Phase 6: settings modal + DB export/import
+  $("open-settings")?.addEventListener("click", openSettings);
+  $("close-settings")?.addEventListener("click", closeSettings);
+  $("save-settings")?.addEventListener("click", saveSettings);
+  $("reset-settings")?.addEventListener("click", resetSettings);
+  $("settings-modal")?.addEventListener("click", (e) => {
+    if (e.target.id === "settings-modal") closeSettings();
+  });
+  $("db-export")?.addEventListener("click", exportDb);
+  $("db-import")?.addEventListener("click", () => $("db-import-file").click());
+  $("db-import-file")?.addEventListener("change", (e) => {
+    importDbFile(e.target.files && e.target.files[0]);
+    e.target.value = "";
   });
 
   // Phase 5: hypotheses tab controls

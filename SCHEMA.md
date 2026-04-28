@@ -200,6 +200,33 @@ identities additionally appear in the graph as `rule` nodes named
 `r:hyp_<id>` connected to every problem in their `support_problem_ids`
 via `uses_rule` edges.
 
+## Export / import bundle (Phase 6)
+
+`GET /db/export` returns a JSON bundle that round-trips losslessly through
+`POST /db/import`:
+
+```json
+{
+  "schema_version": 1,
+  "tables": {
+    "problems":      [ {... full row ...}, ... ],
+    "attempts":      [ ... ],
+    "tool_outcomes": [ ... ],
+    "hypotheses":    [ ... ]
+  },
+  "graph_pickle_b64": "<base64-encoded NetworkX MultiDiGraph pickle>"
+}
+```
+
+Imports are atomic at the SQL layer: every table is wiped and re-inserted
+inside a single transaction, so a malformed bundle leaves the existing
+store untouched. The graph is replaced after the SQL commit; if that
+side fails for any reason the SQL is already safe and the user can retry.
+
+The bundle is the canonical artefact for sharing or version-controlling
+an engine's accumulated state. The `failure_modes_json` and
+`cross_verify_*` columns flow through transparently.
+
 ## Tool registry (Phase 4)
 
 Every backend implements the `Tool` ABC in `pru_math/tools/base.py`:

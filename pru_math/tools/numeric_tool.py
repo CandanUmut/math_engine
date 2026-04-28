@@ -203,6 +203,10 @@ class NumericTool(Tool):
     everything it depends on is a hard requirement of the package."""
 
     name = TOOL_NAME
+    # Numeric is a strong cross-verifier — sampling a closed-form answer
+    # at many points catches most algebra mistakes — but it's empirical,
+    # so Z3's actual proof beats it.
+    cross_verify_priority = 50
 
     def is_available(self) -> bool:
         return True
@@ -227,7 +231,7 @@ class NumericTool(Tool):
             return 0.6
         return 0.5
 
-    def solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
+    def _solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
         approaches = dict(
             (name, fn)
             for lst in _APPROACHES.values()

@@ -316,6 +316,61 @@ button.subtle-btn:hover { color: var(--text); transform: none; box-shadow: none;
 /* Attempt result row helper used by the Attempts panel */
 .attempt-row .vresult { font-family: var(--mono); font-size: 11.5px; }
 
+/* ── Settings modal + cog (Phase 6) ──────────────────────────────── */
+
+.cog-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--panel-border);
+  padding: 4px 10px; border-radius: 8px;
+  font-size: 14px; line-height: 1;
+}
+.cog-btn:hover { color: var(--text); transform: none; box-shadow: none; }
+
+.modal {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(11,13,18,0.7);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(6px);
+}
+.modal[hidden] { display: none; }
+.modal-card {
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 22px 24px;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+}
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px;
+}
+.modal-header h2 {
+  margin: 0; font-size: 13px; text-transform: uppercase;
+  letter-spacing: 0.14em; color: var(--muted); font-weight: 600;
+}
+
+.settings-form {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px;
+  margin: 14px 0;
+  font-size: 12.5px;
+}
+.settings-form label {
+  display: flex; flex-direction: column; gap: 4px;
+  color: var(--muted);
+}
+.settings-form input, .settings-form select {
+  background: rgba(0,0,0,0.32); color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px; padding: 6px 9px;
+  font-family: var(--mono); font-size: 12.5px;
+}
+.settings-form input[type="checkbox"] { width: 18px; height: 18px; }
+
+.db-export-controls { display: flex; gap: 6px; margin-left: auto; }
+
 /* ── Hypotheses tab (Phase 5) ────────────────────────────────────── */
 
 .tab-badge {

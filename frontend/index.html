@@ -33,8 +33,26 @@
       <span class="stat"><span class="stat-label">graph</span>
         <span id="stat-nodes">–</span>n / <span id="stat-edges">–</span>e
       </span>
+      <button id="open-settings" class="cog-btn" title="Settings">⚙</button>
     </div>
   </header>
+
+  <!-- ── Settings modal ─────────────────────────────────────────────── -->
+  <div id="settings-modal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button id="close-settings" class="subtle-btn">close</button>
+      </div>
+      <p class="hint">Live config — changes apply immediately and persist across restarts.</p>
+      <form id="settings-form" class="settings-form"></form>
+      <div class="row">
+        <button id="save-settings">save</button>
+        <button id="reset-settings" class="subtle-btn">reset to defaults</button>
+        <span id="settings-status" class="subtle"></span>
+      </div>
+    </div>
+  </div>
 
   <div class="tools-bar" id="tools-bar"><span class="label">tools</span></div>
 
@@ -130,6 +148,11 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
         <button class="db-tab" data-db="tool_outcomes">tool_outcomes</button>
       </div>
       <input id="db-filter" type="text" placeholder="filter…" />
+      <div class="db-export-controls">
+        <button id="db-export" class="subtle-btn">export</button>
+        <button id="db-import" class="subtle-btn">import…</button>
+        <input id="db-import-file" type="file" accept="application/json" hidden />
+      </div>
     </div>
     <div id="db-table" class="db-table"></div>
   </section>
