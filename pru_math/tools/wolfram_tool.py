@@ -132,7 +132,7 @@ class WolframTool(Tool):
         # Wolfram is a generalist HTTP fallback: never zero, never one.
         return 0.5
 
-    def solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
+    def _solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
         app_id = _app_id()
         if not app_id:
             return ToolResult(tool=self.name, approach=approach, success=False,

@@ -366,6 +366,10 @@ class SymPyTool(Tool):
     """
 
     name = TOOL_NAME
+    # As a cross-verifier, SymPy is decent (it can re-derive symbolically)
+    # but Z3 gives a proof and numeric gives empirical agreement faster,
+    # so SymPy ranks lowest of the three for cross-verification.
+    cross_verify_priority = 10
 
     def is_available(self) -> bool:
         return True
@@ -376,5 +380,5 @@ class SymPyTool(Tool):
     def can_handle(self, fingerprint):
         return 1.0
 
-    def solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
+    def _solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
         return solve_with_approach(problem, approach)

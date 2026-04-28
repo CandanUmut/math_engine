@@ -241,6 +241,9 @@ def _fmt_solutions(solutions: list[sp.Basic]) -> tuple[str, str]:
 
 class Z3Tool(Tool):
     name = TOOL_NAME
+    # Z3 actually *proves* equality, so it's the strongest cross-verifier
+    # the engine has when the problem fits the SMT subset.
+    cross_verify_priority = 100
 
     def is_available(self) -> bool:
         return _Z3_AVAILABLE
@@ -265,7 +268,7 @@ class Z3Tool(Tool):
             return 0.7
         return 0.4
 
-    def solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
+    def _solve_with(self, problem: ParsedProblem, approach: str) -> ToolResult:
         if not _Z3_AVAILABLE:
             return ToolResult(tool=self.name, approach=approach, success=False,
                               error="z3-solver is not installed")

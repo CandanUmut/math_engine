@@ -36,7 +36,9 @@ class _StubTool(Tool):
     def can_handle(self, fingerprint):
         return self._confidence
 
-    def solve_with(self, problem, approach):
+    # Override _solve_with (the inner method); the base ``solve_with``
+    # wraps it with the timeout enforcer.
+    def _solve_with(self, problem, approach):
         return ToolResult(
             tool=self.name, approach=approach, success=True,
             result="ok", result_pretty="ok", result_repr="'ok'",

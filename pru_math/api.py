@@ -33,6 +33,7 @@ from .hypothesizer import Hypothesizer
 from .learner import Learner
 from .reasoner import Reasoner
 from .retrieval import find_similar_problems
+from . import settings as runtime_settings
 from .store import HypothesisRecord, Store
 from .tools import sympy_tool
 from .tools.registry import ToolRegistry, default_registry
@@ -99,7 +100,8 @@ def create_app(store: Store | None = None,
     learner = learner or Learner(store)
     registry = registry or default_registry()
     hypothesizer = hypothesizer or Hypothesizer(store=store, graph=graph)
-    reasoner = Reasoner(store=store, graph=graph, learner=learner, registry=registry)
+    reasoner = Reasoner(store=store, graph=graph, learner=learner,
+                        registry=registry, hypothesizer=hypothesizer)
 
     app = FastAPI(title="PRU Math Engine", version="0.5.0")
 
@@ -223,6 +225,22 @@ def create_app(store: Store | None = None,
 
     # --- Stats ---------------------------------------------------------------
 
+    # --- Export / Import (Phase 6) ----------------------------------------
+
+    @app.get("/db/export")
+    def db_export() -> dict[str, Any]:
+        from .exporter import export_bundle
+        return export_bundle(store, graph)
+
+    @app.post("/db/import")
+    def db_import(body: dict[str, Any]) -> dict[str, Any]:
+        from .exporter import import_bundle
+        try:
+            counts = import_bundle(store, graph, body)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return {"ok": True, "counts": counts}
+
     @app.get("/db/stats")
     def stats() -> dict[str, Any]:
         s = store.stats()
@@ -274,16 +292,24 @@ def create_app(store: Store | None = None,
 
     @app.get("/config")
     def config() -> dict[str, Any]:
-        return {
-            "ollama_enabled": CONFIG.ollama_enabled,
-            "ollama_model": CONFIG.ollama_model,
-            "similarity_threshold": CONFIG.similarity_threshold,
-            "similar_top_k": CONFIG.similar_top_k,
-            "tool_timeout_s": CONFIG.tool_timeout_s,
-            "max_attempts": CONFIG.max_attempts,
-            "learner_exploration": CONFIG.learner_exploration,
-            "cross_verify": CONFIG.cross_verify,
-        }
+        out = runtime_settings.all_values()
+        out["settable_keys"] = list(runtime_settings.SETTABLE_KEYS.keys())
+        return out
+
+    @app.put("/config")
+    def update_config(updates: dict[str, Any]) -> dict[str, Any]:
+        # Body is an arbitrary JSON object; runtime_settings.set_many is
+        # the single source of truth for validation.
+        try:
+            return runtime_settings.set_many(updates)
+        except KeyError as exc:
+            raise HTTPException(400, f"unknown setting: {exc}")
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/config/reset")
+    def reset_config(keys: list[str] | None = None) -> dict[str, Any]:
+        return runtime_settings.reset(keys)
 
     @app.get("/tools")
     def list_tools() -> dict[str, Any]:

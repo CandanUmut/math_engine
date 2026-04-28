@@ -17,15 +17,18 @@ See `PHILOSOPHY.md` for the longer version, and `SCHEMA.md` for the data model.
 
 ## Status
 
-This repo is **Phase 5 (feature-complete)** of the 5-phase plan.
+The five planned phases are feature-complete; **Phase 6** added the
+operational hardening that turns a demo into a tool you can leave
+running.
 
-| Phase | Scope                                                   | State  |
-| ----- | ------------------------------------------------------- | ------ |
-| 1     | Skeleton · SymPy dispatch · verification · SQLite store | **done** |
-| 2     | Relational graph · similarity-based retrieval           | **done** |
-| 3     | Learning · approach ranking · reasoning trace           | **done** |
-| 4     | Multi-tool orchestration (numeric · Z3 · Wolfram)       | **done** |
-| 5     | Hypothesis generation · identity discovery              | **done** |
+| Phase | Scope                                                       | State  |
+| ----- | ----------------------------------------------------------- | ------ |
+| 1     | Skeleton · SymPy dispatch · verification · SQLite store     | **done** |
+| 2     | Relational graph · similarity-based retrieval               | **done** |
+| 3     | Learning · approach ranking · reasoning trace               | **done** |
+| 4     | Multi-tool orchestration (numeric · Z3 · Wolfram)           | **done** |
+| 5     | Hypothesis generation · identity discovery                  | **done** |
+| 6     | Operational hardening (timeouts, settings, export, autoscan)| **done** |
 
 The Phase 5 success criterion — "the system has proposed and verified at
 least one identity or shortcut that was not explicitly given to it" —
@@ -78,6 +81,14 @@ with `uses_rule` edges back to the supporting problems.
 - **Self-confidence as tiebreak**: each tool's `can_handle(fingerprint)` returns a confidence in `[0, 1]`. The registry sorts candidates by confidence; the learner uses original input order as a deterministic tiebreaker so a cold-start problem prefers the high-confidence tool's approach.
 - **`GET /tools`** lists every registered tool with its availability and class name.
 - **End-to-end**: with the default registry (SymPy + numeric + Z3, Wolfram unavailable), `Integral(x**2, (x, 0, 1))` is solved by SymPy and cross-verified `agree` by numeric quadrature; quadratics are solved by `sympy.roots` and cross-verified by either numeric or Z3 depending on which is picked first.
+
+### What Phase 6 adds
+
+- **Tool-call timeout enforcement** — `CONFIG.tool_timeout_s` was read but never applied; now every `Tool.solve_with` is wrapped in a `concurrent.futures` budget. A timeout becomes an ordinary failed `ToolResult` with `error="ToolTimeoutError: ..."`, so the learner records it as a normal failure mode and moves on to the next candidate. Per-tool `timeout_s` overrides are supported.
+- **Cross-verifier priority** — Z3 (proof) outranks numeric (empirical agreement) outranks SymPy (symbolic re-derivation). The `pick_cross_verifier` returns the highest-priority eligible tool deterministically, so `Z3` is preferred whenever it can handle the problem.
+- **Runtime settings** (`pru_math/settings.py`). Layered on top of frozen `CONFIG` so a `PUT /config` flip takes effect immediately and persists to `data/settings.json` without restarting. The validator is the single source of truth for ranges and types. New endpoints: `GET /config` (now also lists `settable_keys`), `PUT /config`, `POST /config/reset`. The UI gains a cog icon that opens a settings modal.
+- **Database export / import** (`pru_math/exporter.py`). `GET /db/export` returns a single JSON bundle of every persisted row plus a base64-encoded gpickle of the graph; `POST /db/import` replaces the live state atomically (single SQL transaction) and rejects malformed bundles. The Database tab gains export and import buttons. The user's accumulated knowledge is now portable.
+- **Auto-scan**. With `auto_scan_every_n > 0`, the reasoner triggers `Hypothesizer.scan(verify=True)` in-process every N solves. The result lands in the trace as an `auto_scan` step listing what was discovered. Set `PRU_AUTO_SCAN_EVERY_N=10` (or change it live in the settings modal) and the system continuously hunts for new identities while you work.
 
 ### What Phase 5 adds
 
@@ -180,6 +191,9 @@ translates language into a SymPy-parseable expression. See
 | `pru_math/learner.py`               | **Phase 3** — UCB1 ranker over `(signature, tool, approach)` statistics |
 | `pru_math/tools/registry.py`        | **Phase 4** — `Tool` ABC + `ToolRegistry` for multi-tool orchestration |
 | `pru_math/hypothesizer.py`          | **Phase 5** — three detectors + verification pipeline for identities and routing rules |
+| `pru_math/tools/timeout.py`         | **Phase 6** — `run_with_timeout` wrapper enforcing `PRU_TOOL_TIMEOUT_S` |
+| `pru_math/settings.py`              | **Phase 6** — layered runtime config, persistent JSON overrides |
+| `pru_math/exporter.py`              | **Phase 6** — single-bundle DB + graph export / atomic import |
 | `pru_math/tools/numeric_tool.py`    | **Phase 4** — scipy / mpmath fallback (`numeric.fsolve`, `numeric.brentq`, `numeric.quad`, `numeric.evalf`) |
 | `pru_math/tools/z3_tool.py`         | **Phase 4** — Z3 SMT backend with SymPy→Z3 translator (graceful when missing) |
 | `pru_math/tools/wolfram_tool.py`    | **Phase 4** — optional HTTP backend, gated by `WOLFRAM_APP_ID` |
@@ -194,7 +208,7 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-121 tests covering the parser (three formats), fingerprint determinism
+147 tests covering the parser (three formats), fingerprint determinism
 and similarity, SymPy tool dispatch for every supported problem type,
 the verifier against correct and wrong candidates, the SQLite store,
 the graph (node/edge add, similarity edges, persistence round-trip,
