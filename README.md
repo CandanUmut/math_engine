@@ -32,6 +32,7 @@ signature classes get flagged with their working fallback.
 | 5     | Hypothesis generation · identity discovery                  | **done** |
 | 6     | Operational hardening (timeouts, settings, export, autoscan)| **done** |
 | 7     | Reasoning quality (identity-aware ranking, transitivity)    | **done** |
+| 8     | Notebook sessions · Ollama narrator                         | **done** |
 
 The Phase 5 success criterion — "the system has proposed and verified at
 least one identity or shortcut that was not explicitly given to it" —
@@ -84,6 +85,19 @@ with `uses_rule` edges back to the supporting problems.
 - **Self-confidence as tiebreak**: each tool's `can_handle(fingerprint)` returns a confidence in `[0, 1]`. The registry sorts candidates by confidence; the learner uses original input order as a deterministic tiebreaker so a cold-start problem prefers the high-confidence tool's approach.
 - **`GET /tools`** lists every registered tool with its availability and class name.
 - **End-to-end**: with the default registry (SymPy + numeric + Z3, Wolfram unavailable), `Integral(x**2, (x, 0, 1))` is solved by SymPy and cross-verified `agree` by numeric quadrature; quadratics are solved by `sympy.roots` and cross-verified by either numeric or Z3 depending on which is picked first.
+
+### What Phase 8 adds
+
+Turns the engine from "a calculator that learns" into something a researcher can use as a working notebook.
+
+- **Sessions** — a small `sessions` table (id / title / notes_markdown / timestamps) plus a nullable `session_id` column on `problems` (auto-migrated). Group related problems together with free-form markdown notes; problems linked to a deleted session keep their data with `session_id=NULL`. Existing solves stay valid.
+- **Endpoints**: `GET /sessions`, `POST /sessions`, `GET /sessions/{id}` (returns the session plus its problem list in solve order), `PUT /sessions/{id}`, `DELETE /sessions/{id}`, `POST /problems/{id}/session` (attach / detach). `POST /solve` now accepts an optional `session_id`.
+- **`POST /explain/{problem_id}`** — Ollama narrator. Reads the existing solved record (problem, attempts, verification, cross-verify), builds a strictly-constrained prompt that forbids the model from solving anything, and returns a 2–5 sentence plain-English narration. Falls back to a deterministic English summary built from the trace when `OLLAMA_ENABLED=false` or the local model is unreachable, so the endpoint always returns something useful.
+- **Sessions panel** on the Solve tab: dropdown to pick a session, "new" / "rename" / "delete" controls, an editable markdown notes area that persists on save. Solves with an active session attach automatically.
+- **"Explain in plain English"** button next to the answer; the narration appears below with a small `source: ollama|deterministic` tag so users always know whether they're reading machine-paraphrased English or a deterministic template.
+- `/db/stats` now reports a `sessions: <count>` field.
+
+The hard constraint stays in force: **the LLM never decides math.** Every fact in the narration comes from the engine's own records; the model only paraphrases.
 
 ### What Phase 7 adds
 
@@ -208,6 +222,7 @@ translates language into a SymPy-parseable expression. See
 | `pru_math/settings.py`              | **Phase 6** — layered runtime config, persistent JSON overrides |
 | `pru_math/exporter.py`              | **Phase 6** — single-bundle DB + graph export / atomic import |
 | `pru_math/rules.py`                 | **Phase 7** — graph traversal from a fingerprint to verified-rule witnesses |
+| `pru_math/narrator.py`              | **Phase 8** — Ollama-backed plain-English narration of a stored trace (with deterministic fallback) |
 | `pru_math/tools/numeric_tool.py`    | **Phase 4** — scipy / mpmath fallback (`numeric.fsolve`, `numeric.brentq`, `numeric.quad`, `numeric.evalf`) |
 | `pru_math/tools/z3_tool.py`         | **Phase 4** — Z3 SMT backend with SymPy→Z3 translator (graceful when missing) |
 | `pru_math/tools/wolfram_tool.py`    | **Phase 4** — optional HTTP backend, gated by `WOLFRAM_APP_ID` |
@@ -222,7 +237,7 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-155 tests covering the parser (three formats), fingerprint determinism
+169 tests covering the parser (three formats), fingerprint determinism
 and similarity, SymPy tool dispatch for every supported problem type,
 the verifier against correct and wrong candidates, the SQLite store,
 the graph (node/edge add, similarity edges, persistence round-trip,

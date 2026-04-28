@@ -94,6 +94,17 @@ CREATE TABLE IF NOT EXISTS hypotheses (
 
 CREATE INDEX IF NOT EXISTS idx_hypotheses_status ON hypotheses(status);
 CREATE INDEX IF NOT EXISTS idx_hypotheses_kind ON hypotheses(kind);
+
+-- Phase 8: notebook-style sessions. Group related problems with a
+-- title and free-form markdown notes; export a session as a self-contained
+-- bundle. Existing problems stay valid (session_id is nullable).
+CREATE TABLE IF NOT EXISTS sessions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    title           TEXT    NOT NULL,
+    notes_markdown  TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 # Columns added after the initial schema. Each entry is a (table, column,
@@ -105,6 +116,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("attempts",      "cross_verify_status",     "TEXT"),
     ("attempts",      "cross_verify_detail",     "TEXT"),
     ("attempts",      "cross_verify_time_ms",    "REAL"),
+    # Phase 8
+    ("problems",      "session_id",              "INTEGER"),
 ]
 
 
@@ -144,6 +157,7 @@ class ProblemRecord:
     fingerprint: dict[str, Any]
     signature: str
     created_at: str
+    session_id: int | None = None
 
 
 @dataclass
@@ -169,6 +183,15 @@ class ToolOutcomeRecord:
     @property
     def success_rate(self) -> float:
         return self.n_success / self.n_attempts if self.n_attempts else 0.0
+
+
+@dataclass
+class SessionRecord:
+    id: int
+    title: str
+    notes_markdown: str
+    created_at: str
+    updated_at: str
 
 
 @dataclass
@@ -254,6 +277,7 @@ class Store:
         parsed_expr: str,
         parsed_pretty: str,
         fingerprint: dict[str, Any],
+        session_id: int | None = None,
     ) -> int:
         signature = fingerprint.get("signature") or ""
         with self._cursor() as cur:
@@ -261,8 +285,8 @@ class Store:
                 """
                 INSERT INTO problems
                     (raw_input, source_format, problem_type, parsed_expr,
-                     parsed_pretty, fingerprint_json, signature)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     parsed_pretty, fingerprint_json, signature, session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     raw_input,
@@ -272,6 +296,7 @@ class Store:
                     parsed_pretty,
                     json.dumps(fingerprint, sort_keys=True),
                     signature,
+                    int(session_id) if session_id is not None else None,
                 ),
             )
             return int(cur.lastrowid)
@@ -393,6 +418,8 @@ class Store:
     # --- reads ----------------------------------------------------------
 
     def _row_to_problem(self, row: sqlite3.Row) -> ProblemRecord:
+        keys = row.keys() if hasattr(row, "keys") else []
+        sid = row["session_id"] if "session_id" in keys else None
         return ProblemRecord(
             id=row["id"],
             raw_input=row["raw_input"],
@@ -403,6 +430,7 @@ class Store:
             fingerprint=json.loads(row["fingerprint_json"]),
             signature=row["signature"],
             created_at=row["created_at"],
+            session_id=int(sid) if sid is not None else None,
         )
 
     def _row_to_attempt(self, row: sqlite3.Row) -> AttemptRecord:
@@ -637,6 +665,89 @@ class Store:
                 "SELECT status, COUNT(*) AS c FROM hypotheses GROUP BY status",
             ).fetchall()
         return {r["status"]: int(r["c"]) for r in rows}
+
+    # --- Sessions (Phase 8) -------------------------------------------
+
+    def _row_to_session(self, row: sqlite3.Row) -> SessionRecord:
+        return SessionRecord(
+            id=row["id"], title=row["title"],
+            notes_markdown=row["notes_markdown"] or "",
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    def create_session(self, *, title: str,
+                       notes_markdown: str = "") -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO sessions (title, notes_markdown) VALUES (?, ?)",
+                (title, notes_markdown),
+            )
+            return int(cur.lastrowid)
+
+    def get_session(self, session_id: int) -> SessionRecord | None:
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT * FROM sessions WHERE id = ?", (int(session_id),),
+            ).fetchone()
+        return self._row_to_session(row) if row else None
+
+    def list_sessions(self, limit: int = 200) -> list[SessionRecord]:
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [self._row_to_session(r) for r in rows]
+
+    def update_session(self, *, session_id: int,
+                       title: str | None = None,
+                       notes_markdown: str | None = None) -> SessionRecord | None:
+        if title is None and notes_markdown is None:
+            return self.get_session(session_id)
+        sets, args = [], []
+        if title is not None:
+            sets.append("title = ?"); args.append(title)
+        if notes_markdown is not None:
+            sets.append("notes_markdown = ?"); args.append(notes_markdown)
+        sets.append("updated_at = datetime('now')")
+        args.append(int(session_id))
+        with self._cursor() as cur:
+            cur.execute(
+                f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?", args,
+            )
+        return self.get_session(session_id)
+
+    def delete_session(self, session_id: int) -> bool:
+        """Delete a session. Problems linked to it have their session_id
+        nulled out — we never cascade-delete user problems."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE problems SET session_id = NULL WHERE session_id = ?",
+                (int(session_id),),
+            )
+            cur.execute(
+                "DELETE FROM sessions WHERE id = ?", (int(session_id),),
+            )
+            return cur.rowcount > 0
+
+    def set_problem_session(self, *, problem_id: int,
+                            session_id: int | None) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE problems SET session_id = ? WHERE id = ?",
+                (int(session_id) if session_id is not None else None,
+                 int(problem_id)),
+            )
+
+    def list_problems_by_session(self, session_id: int,
+                                 limit: int = 200) -> list[ProblemRecord]:
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT * FROM problems WHERE session_id = ? "
+                "ORDER BY id ASC LIMIT ?",
+                (int(session_id), int(limit)),
+            ).fetchall()
+        return [self._row_to_problem(r) for r in rows]
 
     def attempt_timeline(self, limit: int = 500) -> list[dict[str, Any]]:
         """Recent attempts as plain dicts, suitable for charts / dashboards."""

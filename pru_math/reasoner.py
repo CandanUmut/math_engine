@@ -140,7 +140,7 @@ class Reasoner:
 
     # -------------------------------------------------------------------
 
-    def solve(self, text: str) -> SolveOutcome:
+    def solve(self, text: str, *, session_id: int | None = None) -> SolveOutcome:
         trace: list[TraceStep] = []
 
         # 1. Parse
@@ -222,6 +222,7 @@ class Reasoner:
             parsed_expr=parsed.expr_repr(),
             parsed_pretty=parsed.pretty(),
             fingerprint=fp,
+            session_id=session_id,
         )
 
         # 5. Rank approaches across every available tool.

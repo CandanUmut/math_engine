@@ -272,12 +272,19 @@ async function submitSolve() {
   btn.disabled = true;
   $("hint").textContent = "Solving…";
   try {
+    const body = { text };
+    if (activeSessionId !== null) body.session_id = activeSessionId;
     const r = await fetch("/solve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
     });
     const out = await r.json();
+    lastSolvedProblemId = out.problem_id ?? null;
+    // reset any stale explain panel
+    const ex = $("explain-text");
+    if (ex) { ex.hidden = true; ex.textContent = ""; }
+    $("explain-status").textContent = "";
     renderOutcome(out);
     $("hint").textContent = out.ok ? "" : "Tool failed — see trace.";
   } catch (err) {
@@ -686,6 +693,152 @@ async function refreshInsights() {
   }
 }
 
+/* ── Sessions + Explain (Phase 8) ─────────────────────────────────── */
+
+let activeSessionId = null;
+let sessionsCache = [];
+
+function getActiveSession() {
+  return sessionsCache.find((s) => s.id === activeSessionId) || null;
+}
+
+async function refreshSessions() {
+  try {
+    const r = await fetch("/sessions");
+    sessionsCache = (await r.json()).items || [];
+  } catch (_) {
+    sessionsCache = [];
+  }
+  const sel = $("session-select");
+  if (!sel) return;
+  sel.innerHTML = '<option value="">(none — global)</option>' +
+    sessionsCache.map((s) =>
+      `<option value="${s.id}">#${s.id} ${escapeHtml(s.title)}</option>`).join("");
+  if (activeSessionId !== null) sel.value = String(activeSessionId);
+  renderActiveSessionPanel();
+}
+
+function renderActiveSessionPanel() {
+  const active = getActiveSession();
+  $("session-rename").hidden = !active;
+  $("session-delete").hidden = !active;
+  const notes = $("session-notes");
+  const notesRow = $("session-notes-row");
+  if (!active) {
+    notes.hidden = true; notesRow.hidden = true;
+    $("session-title").value = "";
+    return;
+  }
+  notes.hidden = false; notesRow.hidden = false;
+  notes.value = active.notes_markdown || "";
+  $("session-title").value = active.title || "";
+  $("session-status").textContent = "";
+}
+
+async function onSessionSelect() {
+  const v = $("session-select").value;
+  activeSessionId = v ? parseInt(v, 10) : null;
+  renderActiveSessionPanel();
+}
+
+async function createSession() {
+  const titleInput = $("session-title");
+  const title = (titleInput.value || "").trim() || "Untitled session";
+  try {
+    const r = await fetch("/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const created = await r.json();
+    activeSessionId = created.id;
+    titleInput.value = "";
+    await refreshSessions();
+  } catch (err) {
+    $("session-status").textContent = "create failed: " + err.message;
+  }
+}
+
+async function renameSession() {
+  const active = getActiveSession();
+  if (!active) return;
+  const title = ($("session-title").value || "").trim();
+  if (!title) return;
+  try {
+    const r = await fetch(`/sessions/${active.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await refreshSessions();
+    $("session-status").textContent = "renamed.";
+  } catch (err) {
+    $("session-status").textContent = "rename failed: " + err.message;
+  }
+}
+
+async function deleteSession() {
+  const active = getActiveSession();
+  if (!active) return;
+  if (!confirm(`Delete session #${active.id} "${active.title}"? Linked problems stay but are unlinked.`)) return;
+  try {
+    const r = await fetch(`/sessions/${active.id}`, { method: "DELETE" });
+    if (!r.ok) throw new Error(await r.text());
+    activeSessionId = null;
+    await refreshSessions();
+    refreshRecent();
+  } catch (err) {
+    $("session-status").textContent = "delete failed: " + err.message;
+  }
+}
+
+async function saveSessionNotes() {
+  const active = getActiveSession();
+  if (!active) return;
+  const notes = $("session-notes").value;
+  $("session-status").textContent = "saving…";
+  try {
+    const r = await fetch(`/sessions/${active.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notes_markdown: notes }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await refreshSessions();
+    $("session-status").textContent = "saved.";
+  } catch (err) {
+    $("session-status").textContent = "save failed: " + err.message;
+  }
+}
+
+async function explainCurrentAnswer() {
+  if (!lastSolvedProblemId) return;
+  const btn = $("explain-btn");
+  const status = $("explain-status");
+  const out = $("explain-text");
+  btn.disabled = true;
+  status.textContent = "asking…";
+  try {
+    const r = await fetch(`/explain/${lastSolvedProblemId}`, { method: "POST" });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    out.hidden = false;
+    out.innerHTML = escapeHtml(data.text || "(no narration)") +
+      `<span class="src">source: ${escapeHtml(data.source || "?")}` +
+      (data.model ? ` · ${escapeHtml(data.model)}` : "") +
+      (data.reason ? ` · ${escapeHtml(data.reason)}` : "") + "</span>";
+    status.textContent = "";
+  } catch (err) {
+    status.textContent = "explain failed: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+let lastSolvedProblemId = null;
+
 /* ── Settings modal (Phase 6) ─────────────────────────────────────── */
 
 const SETTING_TYPES = {
@@ -937,6 +1090,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (traceList) traceList.querySelectorAll("details").forEach((d) => (d.open = false));
   });
 
+  // Phase 8: sessions + explain
+  $("session-select")?.addEventListener("change", onSessionSelect);
+  $("session-new")?.addEventListener("click", createSession);
+  $("session-rename")?.addEventListener("click", renameSession);
+  $("session-delete")?.addEventListener("click", deleteSession);
+  $("session-save-notes")?.addEventListener("click", saveSessionNotes);
+  $("explain-btn")?.addEventListener("click", explainCurrentAnswer);
+
   // Phase 6: settings modal + DB export/import
   $("open-settings")?.addEventListener("click", openSettings);
   $("close-settings")?.addEventListener("click", closeSettings);
@@ -965,4 +1126,5 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshStats();
   refreshRecent();
   refreshToolsBar();
+  refreshSessions();
 });

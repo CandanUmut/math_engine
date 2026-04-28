@@ -316,6 +316,40 @@ button.subtle-btn:hover { color: var(--text); transform: none; box-shadow: none;
 /* Attempt result row helper used by the Attempts panel */
 .attempt-row .vresult { font-family: var(--mono); font-size: 11.5px; }
 
+/* ── Sessions + Explain (Phase 8) ────────────────────────────────── */
+
+.session-card { grid-column: 1 / -1; padding: 12px 18px; }
+.session-row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.session-row select,
+.session-row input.session-title-input {
+  background: rgba(0,0,0,0.32); color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px; padding: 5px 9px;
+  font-family: var(--mono); font-size: 12.5px;
+  min-width: 180px;
+}
+#session-notes {
+  width: 100%; margin-top: 10px;
+  background: rgba(0,0,0,0.32); color: var(--text);
+  border: 1px solid var(--panel-border); border-radius: 8px;
+  padding: 9px 11px;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.4;
+}
+
+.explain-text {
+  margin-top: 10px; padding: 12px 14px;
+  background: rgba(0,0,0,0.18);
+  border: 1px solid var(--panel-border); border-radius: 10px;
+  font-size: 13.5px; line-height: 1.55;
+  white-space: pre-wrap;
+}
+.explain-text .src {
+  display: block; color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.1em; margin-top: 8px;
+}
+
 /* ── Settings modal + cog (Phase 6) ──────────────────────────────── */
 
 .cog-btn {

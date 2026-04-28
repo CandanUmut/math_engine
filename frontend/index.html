@@ -58,6 +58,23 @@
 
   <!-- ── Solve tab ──────────────────────────────────────────────────── -->
   <main id="tab-solve" class="grid tabpanel active">
+    <section class="card session-card" id="session-card">
+      <div class="session-row">
+        <label class="subtle" for="session-select">session</label>
+        <select id="session-select"><option value="">(none — global)</option></select>
+        <input id="session-title" type="text" placeholder="new session title"
+               class="session-title-input" />
+        <button id="session-new" class="subtle-btn">new</button>
+        <button id="session-rename" class="subtle-btn" hidden>rename</button>
+        <button id="session-delete" class="subtle-btn" hidden>delete</button>
+      </div>
+      <textarea id="session-notes" rows="3" placeholder="markdown notes for this session…" hidden></textarea>
+      <div class="row" id="session-notes-row" hidden>
+        <button id="session-save-notes" class="subtle-btn">save notes</button>
+        <span id="session-status" class="subtle"></span>
+      </div>
+    </section>
+
     <section class="card input-card">
       <h2>Solve</h2>
       <p class="hint">Enter SymPy syntax, LaTeX, or a natural-language question.
@@ -76,6 +93,11 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
       <h2>Answer</h2>
       <div class="answer" id="answer">—</div>
       <div class="answer-meta" id="answer-meta"></div>
+      <div class="row">
+        <button id="explain-btn" class="subtle-btn">Explain in plain English</button>
+        <span id="explain-status" class="subtle"></span>
+      </div>
+      <div id="explain-text" class="explain-text" hidden></div>
     </section>
 
     <section class="card similar-card" id="similar-card" hidden>
