@@ -227,6 +227,27 @@ The bundle is the canonical artefact for sharing or version-controlling
 an engine's accumulated state. The `failure_modes_json` and
 `cross_verify_*` columns flow through transparently.
 
+## `sessions` (Phase 8)
+
+A notebook-style group of related problems. Lightweight by design: the
+table only holds metadata, and a nullable `session_id` column on
+`problems` is the linkage. Deleting a session never deletes user
+problems — their `session_id` is set to `NULL` so the work survives.
+
+| column            | type    | notes |
+| ----------------- | ------- | ----- |
+| `id`              | INTEGER | primary key, autoincrement |
+| `title`           | TEXT    | required, non-empty |
+| `notes_markdown`  | TEXT    | free-form markdown notes (default `''`) |
+| `created_at`      | TEXT    | ISO timestamp |
+| `updated_at`      | TEXT    | ISO timestamp; bumped on any update |
+
+Plus on `problems` (auto-migrated):
+
+| column        | type    | notes |
+| ------------- | ------- | ----- |
+| `session_id`  | INTEGER | nullable; references `sessions.id` (no FK constraint, manual cleanup on session delete) |
+
 ## Tool registry (Phase 4)
 
 Every backend implements the `Tool` ABC in `pru_math/tools/base.py`:

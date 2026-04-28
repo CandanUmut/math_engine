@@ -41,6 +41,8 @@ from .tools.registry import ToolRegistry, default_registry
 
 class SolveRequest(BaseModel):
     text: str = Field(..., description="Math problem in SymPy, LaTeX, or natural language.")
+    session_id: int | None = Field(default=None,
+        description="Optional session to attach this problem to.")
 
 
 def _attempt_to_dict(a) -> dict[str, Any]:
@@ -76,6 +78,14 @@ def _problem_to_dict(p) -> dict[str, Any]:
         "fingerprint": p.fingerprint,
         "signature": p.signature,
         "created_at": p.created_at,
+        "session_id": p.session_id,
+    }
+
+
+def _session_to_dict(s) -> dict[str, Any]:
+    return {
+        "id": s.id, "title": s.title, "notes_markdown": s.notes_markdown,
+        "created_at": s.created_at, "updated_at": s.updated_at,
     }
 
 
@@ -109,7 +119,7 @@ def create_app(store: Store | None = None,
 
     @app.post("/solve")
     def solve(req: SolveRequest) -> dict[str, Any]:
-        outcome = reasoner.solve(req.text)
+        outcome = reasoner.solve(req.text, session_id=req.session_id)
         return outcome.to_dict()
 
     @app.get("/problems")
@@ -241,11 +251,94 @@ def create_app(store: Store | None = None,
             raise HTTPException(400, str(exc))
         return {"ok": True, "counts": counts}
 
+    # --- Explain (Phase 8) — Ollama narrates an existing trace ------------
+
+    @app.post("/explain/{problem_id}")
+    def explain(problem_id: int) -> dict[str, Any]:
+        from .narrator import explain_record
+        problem = store.get_problem(problem_id)
+        if not problem:
+            raise HTTPException(404, f"no problem with id={problem_id}")
+        attempts = store.list_attempts(problem_id)
+        record = {
+            "problem": _problem_to_dict(problem),
+            "attempts": [_attempt_to_dict(a) for a in attempts],
+        }
+        result = explain_record(record)
+        return {"problem_id": problem_id, **result}
+
+    # --- Sessions (Phase 8) -----------------------------------------------
+
+    @app.get("/sessions")
+    def list_sessions() -> dict[str, Any]:
+        return {"items": [_session_to_dict(s) for s in store.list_sessions()]}
+
+    @app.post("/sessions")
+    def create_session(body: dict[str, Any]) -> dict[str, Any]:
+        title = (body.get("title") or "").strip()
+        if not title:
+            raise HTTPException(400, "title is required")
+        notes = body.get("notes_markdown") or ""
+        if not isinstance(notes, str):
+            raise HTTPException(400, "notes_markdown must be a string")
+        sid = store.create_session(title=title, notes_markdown=notes)
+        return _session_to_dict(store.get_session(sid))   # type: ignore[arg-type]
+
+    @app.get("/sessions/{session_id}")
+    def get_session(session_id: int) -> dict[str, Any]:
+        s = store.get_session(session_id)
+        if not s:
+            raise HTTPException(404, f"no session with id={session_id}")
+        problems = store.list_problems_by_session(session_id)
+        return {
+            "session": _session_to_dict(s),
+            "problems": [_problem_to_dict(p) for p in problems],
+        }
+
+    @app.put("/sessions/{session_id}")
+    def update_session(session_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        title = body.get("title")
+        notes = body.get("notes_markdown")
+        if title is not None and (not isinstance(title, str) or not title.strip()):
+            raise HTTPException(400, "title must be a non-empty string")
+        if notes is not None and not isinstance(notes, str):
+            raise HTTPException(400, "notes_markdown must be a string")
+        s = store.update_session(session_id=session_id,
+                                 title=title.strip() if isinstance(title, str) else None,
+                                 notes_markdown=notes)
+        if not s:
+            raise HTTPException(404, f"no session with id={session_id}")
+        return _session_to_dict(s)
+
+    @app.delete("/sessions/{session_id}")
+    def delete_session(session_id: int) -> dict[str, Any]:
+        ok = store.delete_session(session_id)
+        if not ok:
+            raise HTTPException(404, f"no session with id={session_id}")
+        return {"ok": True}
+
+    @app.post("/problems/{problem_id}/session")
+    def attach_problem_to_session(problem_id: int,
+                                   body: dict[str, Any]) -> dict[str, Any]:
+        if not store.get_problem(problem_id):
+            raise HTTPException(404, f"no problem with id={problem_id}")
+        sid = body.get("session_id")
+        if sid is not None:
+            try:
+                sid = int(sid)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "session_id must be int or null")
+            if sid is not None and not store.get_session(sid):
+                raise HTTPException(404, f"no session with id={sid}")
+        store.set_problem_session(problem_id=problem_id, session_id=sid)
+        return {"ok": True, "problem_id": problem_id, "session_id": sid}
+
     @app.get("/db/stats")
     def stats() -> dict[str, Any]:
         s = store.stats()
         s["graph"] = graph.stats()
         s["hypotheses"] = store.hypothesis_counts()
+        s["sessions"] = len(store.list_sessions(limit=10_000))
         return s
 
     # --- Hypotheses (Phase 5) ----------------------------------------------
