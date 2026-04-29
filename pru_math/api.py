@@ -113,7 +113,26 @@ def create_app(store: Store | None = None,
     reasoner = Reasoner(store=store, graph=graph, learner=learner,
                         registry=registry, hypothesizer=hypothesizer)
 
-    app = FastAPI(title="PRU Math Engine", version="0.5.0")
+    app = FastAPI(title="PRU Math Engine", version="0.10.0")
+
+    # Phase 10: read-only mode. When PRU_READ_ONLY=true (or the runtime
+    # setting flips it on later) the engine refuses any state-changing
+    # request with 403. Lets you publish a server without it learning
+    # from arbitrary visitors. GET/HEAD/OPTIONS pass through unchanged.
+    @app.middleware("http")
+    async def _read_only_guard(request, call_next):
+        if CONFIG.read_only and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "engine is in read-only mode "
+                              "(PRU_READ_ONLY=true); writes are disabled",
+                    "method": request.method,
+                    "path": request.url.path,
+                },
+            )
+        return await call_next(request)
 
     # --- Solve / problems ----------------------------------------------------
 
@@ -387,6 +406,7 @@ def create_app(store: Store | None = None,
     def config() -> dict[str, Any]:
         out = runtime_settings.all_values()
         out["settable_keys"] = list(runtime_settings.SETTABLE_KEYS.keys())
+        out["read_only"] = CONFIG.read_only
         return out
 
     @app.put("/config")
@@ -412,8 +432,16 @@ def create_app(store: Store | None = None,
         }
 
     # --- Frontend (static UI) -----------------------------------------------
-    frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
-    if frontend_dir.is_dir():
+    # Phase 10: the frontend lives inside the package so `pip install`
+    # bundles it. We still tolerate a repo-root copy as a fallback so
+    # developers running out of an old checkout don't get a 404.
+    here = Path(__file__).resolve().parent
+    frontend_candidates = [
+        here / "frontend",            # installed / current dev layout
+        here.parent / "frontend",     # legacy: pre-Phase 10 dev tree
+    ]
+    frontend_dir = next((p for p in frontend_candidates if p.is_dir()), None)
+    if frontend_dir is not None:
         static_dir = frontend_dir / "static"
         if static_dir.is_dir():
             app.mount("/static", StaticFiles(directory=static_dir), name="static")

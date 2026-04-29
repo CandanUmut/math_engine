@@ -36,6 +36,9 @@ SETTABLE_KEYS: dict[str, str] = {
     "auto_scan_every_n":     "int>=0",
     "ollama_enabled":        "bool",
     "ollama_model":          "str",
+    # Phase 9: rewrite-based search
+    "enable_rewriting":      "bool",
+    "max_rewrite_attempts":  "int>=0",
 }
 
 
@@ -61,6 +64,8 @@ def _defaults() -> dict[str, Any]:
         "auto_scan_every_n":    int(os.getenv("PRU_AUTO_SCAN_EVERY_N", "0")),
         "ollama_enabled":       CONFIG.ollama_enabled,
         "ollama_model":         CONFIG.ollama_model,
+        "enable_rewriting":     os.getenv("PRU_ENABLE_REWRITING", "true").lower() in {"1", "true", "yes"},
+        "max_rewrite_attempts": int(os.getenv("PRU_MAX_REWRITE_ATTEMPTS", "2")),
     }
 
 

@@ -1,11 +1,17 @@
 """Reasoner orchestrator.
 
-Phase 4 flow:
+Phase 9 flow (Phase 4 extended):
 
     parse → fingerprint → retrieval → rank approaches (across all tools) →
         try (≤budget):
             tool_call → verify → persist attempt
             stop early on verified
+        if NOT verified and rewriting is enabled:
+            for each verified-identity rule that matches (≤ max_rewrite_attempts):
+                rewrite the problem via the rule, run one attempt with
+                the top-ranked approach for the new shape, verify
+                against the ORIGINAL problem
+                stop early on verified
         → cross_verify (optional, second tool re-checks the answer)
         → graph_update → emit trace
 
@@ -137,6 +143,20 @@ class Reasoner:
         if self._explicit_cross_verify is not None:
             return bool(self._explicit_cross_verify)
         return bool(runtime_settings.get("cross_verify"))
+
+    @property
+    def rewriting_enabled(self) -> bool:
+        try:
+            return bool(runtime_settings.get("enable_rewriting"))
+        except Exception:
+            return True
+
+    @property
+    def max_rewrite_attempts(self) -> int:
+        try:
+            return max(0, int(runtime_settings.get("max_rewrite_attempts")))
+        except Exception:
+            return 2
 
     # -------------------------------------------------------------------
 
@@ -357,6 +377,30 @@ class Reasoner:
                 chosen_verification = verification
                 break
 
+        # Phase 9: rewrite-based search. Fires only when no primary
+        # attempt verified, and only when the user has at least one
+        # verified-identity hypothesis the engine can use as a rule.
+        # Verification still runs against the ORIGINAL parsed problem.
+        chosen_verified = bool(
+            chosen_verification and chosen_verification.status == "verified"
+        )
+        if (
+            not chosen_verified
+            and self.rewriting_enabled
+            and self.max_rewrite_attempts > 0
+        ):
+            rw_chosen, rw_time_ms = self._try_rewrites(
+                parsed=parsed, fp=fp, problem_id=problem_id,
+                ranked=ranked, attempts=attempts, trace=trace,
+            )
+            total_time_ms += rw_time_ms
+            if rw_chosen is not None:
+                idx, result, verification = rw_chosen
+                chosen_idx = idx
+                chosen_attempt_id = attempts[idx].attempt_id
+                chosen_result = result
+                chosen_verification = verification
+
         # If nothing verified, choose the *best* among what we tried as the
         # surface answer: prefer success, then "inconclusive", then errors.
         if chosen_result is None:
@@ -564,6 +608,146 @@ class Reasoner:
             return (v_rank, 1 if a.success else 0, -a.time_ms)
         best = max(range(len(attempts)), key=lambda i: key(attempts[i]))
         return best
+
+    # --- Rewrite-based search (Phase 9) ----------------------------------
+
+    def _try_rewrites(
+        self,
+        *,
+        parsed: ParsedProblem,
+        fp: dict[str, Any],
+        problem_id: int,
+        ranked: list[CandidateStats],
+        attempts: list[AttemptOutcome],
+        trace: list[TraceStep],
+    ) -> tuple[tuple[int, ToolResult, VerificationResult] | None, float]:
+        """Try ≤ ``max_rewrite_attempts`` rule-based rewrites of ``parsed``.
+
+        Each rewrite is run with the top-ranked primary approach, and
+        verified against the *original* ``parsed`` problem so the audit
+        story stays clean (the engine never claims "x is the answer to A"
+        when it actually solved B). Returns the chosen ``(idx, result,
+        verification)`` if any rewrite verified, plus the total
+        wall-time spent across all rewrite attempts.
+        """
+        # Imported lazily so users who don't have any verified rules
+        # never pay the import.
+        from .rewriter import generate_rewrites, load_rules_from_store
+
+        time_delta = 0.0
+
+        rules = load_rules_from_store(self.store)
+        if not rules:
+            return None, time_delta
+
+        rewrites = generate_rewrites(
+            parsed, rules, max_rewrites=self.max_rewrite_attempts,
+        )
+        if not rewrites:
+            return None, time_delta
+
+        # Pick the primary approach to use on rewritten forms — for now
+        # just use the top-ranked candidate. Phase 9+ could re-rank per
+        # rewritten shape, but that doubles the cost for marginal gain.
+        if not ranked:
+            return None, time_delta
+        primary = ranked[0]
+
+        chosen: tuple[int, ToolResult, VerificationResult] | None = None
+        for rw in rewrites:
+            trace.append(TraceStep(
+                kind="rewrite",
+                summary=(
+                    f"rewrite via rule #{rw.rule.rule_id} "
+                    f"({rw.rule.direction}): "
+                    f"{rw.rule.lhs_pretty} → {rw.rule.rhs_pretty}"
+                ),
+                detail=rw.to_trace_dict(),
+            ))
+
+            result = self.registry.solve_with(
+                tool=primary.tool, approach=primary.approach,
+                problem=rw.parsed,
+            )
+            time_delta += result.time_ms
+            trace.append(TraceStep(
+                kind="tool_call",
+                summary=(
+                    f"[rewrite#{rw.rule.rule_id}] {result.approach} → "
+                    f"{'ok' if result.success else 'error'} "
+                    f"in {result.time_ms:.1f} ms"
+                ),
+                detail={
+                    "tool": result.tool,
+                    "approach": result.approach,
+                    "rewrite_via_rule": rw.rule.rule_id,
+                    "rewritten_expr": rw.to_trace_dict()["rewritten_expr"],
+                    "result_pretty": result.result_pretty,
+                    "error": result.error,
+                },
+            ))
+
+            # Verify against the ORIGINAL problem, not the rewritten one.
+            verification: VerificationResult | None = None
+            if result.success:
+                verification = verify(parsed, result.result)
+                trace.append(TraceStep(
+                    kind="verify",
+                    summary=(
+                        f"[rewrite#{rw.rule.rule_id}] verification: "
+                        f"{verification.status} "
+                        f"({verification.checks} check(s))"
+                    ),
+                    detail={
+                        "status": verification.status,
+                        "detail": verification.detail,
+                    },
+                ))
+
+            error_tag = self._error_tag(result, verification)
+            attempt_id = self.store.insert_attempt(
+                problem_id=problem_id,
+                tool=result.tool,
+                approach=result.approach,
+                success=result.success,
+                result_repr=result.result_repr or None,
+                result_pretty=result.result_pretty or None,
+                verification_status=verification.status if verification else None,
+                verification_detail=verification.detail if verification else None,
+                time_ms=result.time_ms,
+                error=result.error,
+                steps=[*list(result.steps),
+                       f"(rewrite via rule #{rw.rule.rule_id})"],
+            )
+            self.store.upsert_tool_outcome(
+                signature=fp["signature"],
+                tool=result.tool,
+                approach=result.approach,
+                success=result.success,
+                verified=bool(
+                    verification and verification.status == "verified"
+                ),
+                time_ms=result.time_ms,
+                error=error_tag,
+            )
+
+            attempts.append(AttemptOutcome(
+                tool=result.tool,
+                approach=result.approach,
+                success=result.success,
+                result_pretty=result.result_pretty or None,
+                verification_status=verification.status if verification else None,
+                verification_detail=verification.detail if verification else None,
+                time_ms=result.time_ms,
+                error=result.error,
+                attempt_id=attempt_id,
+            ))
+
+            if verification and verification.status == "verified":
+                chosen = (len(attempts) - 1, result, verification)
+                break
+
+        return chosen, time_delta
 
     @staticmethod
     def _rank_deltas(before: list[CandidateStats],
