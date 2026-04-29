@@ -34,6 +34,7 @@ signature classes get flagged with their working fallback.
 | 7     | Reasoning quality (identity-aware ranking, transitivity)    | **done** |
 | 8     | Notebook sessions · Ollama narrator                         | **done** |
 | 9     | Rewrite-based search using verified identities              | **done** |
+| 10    | Distribution: pyproject · console scripts · Docker · read-only | **done** |
 
 The Phase 5 success criterion — "the system has proposed and verified at
 least one identity or shortcut that was not explicitly given to it" —
@@ -86,6 +87,20 @@ with `uses_rule` edges back to the supporting problems.
 - **Self-confidence as tiebreak**: each tool's `can_handle(fingerprint)` returns a confidence in `[0, 1]`. The registry sorts candidates by confidence; the learner uses original input order as a deterministic tiebreaker so a cold-start problem prefers the high-confidence tool's approach.
 - **`GET /tools`** lists every registered tool with its availability and class name.
 - **End-to-end**: with the default registry (SymPy + numeric + Z3, Wolfram unavailable), `Integral(x**2, (x, 0, 1))` is solved by SymPy and cross-verified `agree` by numeric quadrature; quadratics are solved by `sympy.roots` and cross-verified by either numeric or Z3 depending on which is picked first.
+
+### What Phase 10 adds
+
+Turns the repo into something a researcher (or anyone with `pip`) can
+install in one line, run as a service, share via a Docker image, and
+publish in read-only mode.
+
+- **`pyproject.toml`** with full project metadata, dependency declarations, optional `[all]` (Z3) and `[test]` extras, and two console-script entry points: **`pru-math`** (the existing CLI) and **`pru-math-server`** (a uvicorn wrapper). `pip install git+https://github.com/CandanUmut/math_engine.git` works *today*; `pip install pru-math-engine` works after the maintainer's first `twine upload` (steps documented in `INSTALL.md`).
+- **Frontend bundled into the package** — moved from `frontend/` at repo root into `pru_math/frontend/` so `pip install` ships the same UI the source checkout serves. The wheel was verified to include the HTML, CSS, and JS plus both console scripts.
+- **`pru_math/server.py`** — small console-script entry that wraps `uvicorn.run("pru_math.api:app", ...)` with `argparse` flags (`--host`, `--port`, `--reload`, `--log-level`). Lazy-imports uvicorn so `--help` is instant.
+- **Read-only mode**: `PRU_READ_ONLY=true` (or via the live runtime config) installs a small middleware that returns `403 Forbidden` on any non-`GET` request with a clear message. `GET` endpoints work unchanged. Lets you publish a snapshot of accumulated knowledge that visitors can browse but can't poison. `GET /config` reports `read_only` so the UI can hide write controls.
+- **Dockerfile** + **docker-compose.yml** + `.dockerignore`. The image is `python:3.11-slim` based, installs the wheel via pip including the `[all]` extras (Z3), exposes port 8000, runs `pru-math-server`, and has a healthcheck. Persistent state is mounted at `/data`. Compose file is pre-configured to talk to a host-side Ollama via `host.docker.internal`.
+- **`INSTALL.md`** — every install path (pip-from-GitHub, pip-from-PyPI, source clone, Docker), how to connect Ollama, runnable examples for SymPy / LaTeX / NL input, the "system found something" demo, read-only mode, sharing via tarball or JSON bundle, the maintainer's PyPI publishing guide (one-time setup + per-release commands), and a troubleshooting section.
+- **Build verification**: a Phase 10 test reads `pyproject.toml` and confirms both console scripts and dependency declarations are correct; another test verifies the bundled frontend assets actually live inside the package directory at install time. The wheel was also manually built (`python -m build`), verified against PyPI's metadata gate (`twine check`), and installed into a fresh venv where both `pru-math` and `pru-math-server` run.
 
 ### What Phase 9 adds
 
@@ -143,23 +158,36 @@ they influence the next solve.
 - **Hypotheses tab** in the UI — list cards filtered by status / kind, scan-now button, re-verify per row, expandable raw evidence. The tab gains a count badge in the topbar.
 - **Schema**: a new `hypotheses` table with `status`, `kind`, `claim`, `claim_repr`, `fingerprint` (UNIQUE), `evidence_json`, `method`, `verification_detail`, `rule_node`, and timestamps. Indexes on `status` and `kind`. Auto-created on existing databases.
 
-## Running it
+## Install & run
+
+The fastest path:
 
 ```bash
-pip install -r requirements.txt
-
-# CLI smoke test (no server needed)
-python -m pru_math "Eq(x**2 - 5*x + 6, 0)"
-python -m pru_math "Integral(x**2, (x, 0, 1))"
-python -m pru_math "sin(x)^2 + cos(x)^2"
-
-# Web UI
-uvicorn pru_math.api:app --reload
+pip install git+https://github.com/CandanUmut/math_engine.git
+pru-math-server
 # open http://localhost:8000
 ```
 
-Optional: copy `.env.example` to `.env` to point at a different SQLite file,
-a different Ollama host, or disable Ollama.
+Or, with Z3 included:
+
+```bash
+pip install "pru-math-engine[all] @ git+https://github.com/CandanUmut/math_engine.git"
+```
+
+Or just the CLI:
+
+```bash
+pru-math "Eq(x**2 - 5*x + 6, 0)"
+pru-math "Integral(x**2, (x, 0, 1))"
+pru-math "sin(x)^2 + cos(x)^2"
+```
+
+For Docker, source-clone, dev mode, read-only servers, the Ollama setup,
+runnable examples, sharing accumulated knowledge, and the maintainer's
+PyPI publishing guide, see **[INSTALL.md](INSTALL.md)**.
+
+Optional: copy `.env.example` to `.env` to point at a different SQLite
+file, a different Ollama host, or disable Ollama.
 
 ### Ollama (natural-language input)
 
@@ -238,6 +266,9 @@ translates language into a SymPy-parseable expression. See
 | `pru_math/rules.py`                 | **Phase 7** — graph traversal from a fingerprint to verified-rule witnesses |
 | `pru_math/narrator.py`              | **Phase 8** — Ollama-backed plain-English narration of a stored trace (with deterministic fallback) |
 | `pru_math/rewriter.py`              | **Phase 9** — verified identities → rewriting rules; direct + sub-Add subset matching |
+| `pru_math/server.py`                | **Phase 10** — `pru-math-server` console script entry |
+| `pru_math/frontend/`                | **Phase 10** — bundled UI assets (HTML / CSS / JS) inside the package |
+| `pyproject.toml` · `Dockerfile` · `INSTALL.md` | **Phase 10** — distribution: pip-installable, Docker image, install guide |
 | `pru_math/tools/numeric_tool.py`    | **Phase 4** — scipy / mpmath fallback (`numeric.fsolve`, `numeric.brentq`, `numeric.quad`, `numeric.evalf`) |
 | `pru_math/tools/z3_tool.py`         | **Phase 4** — Z3 SMT backend with SymPy→Z3 translator (graceful when missing) |
 | `pru_math/tools/wolfram_tool.py`    | **Phase 4** — optional HTTP backend, gated by `WOLFRAM_APP_ID` |
@@ -252,7 +283,7 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-183 tests covering the parser (three formats), fingerprint determinism
+195 tests covering the parser (three formats), fingerprint determinism
 and similarity, SymPy tool dispatch for every supported problem type,
 the verifier against correct and wrong candidates, the SQLite store,
 the graph (node/edge add, similarity edges, persistence round-trip,

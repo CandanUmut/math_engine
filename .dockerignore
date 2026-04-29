@@ -1,0 +1,21 @@
+# Keep the build context small.
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.env
+*.sqlite
+*.sqlite-journal
+data/
+*.gpickle
+.pytest_cache
+.mypy_cache
+.ruff_cache
+node_modules
+dist
+build
+*.egg-info
+.DS_Store

@@ -1,0 +1,22 @@
+services:
+  pru-math:
+    build: .
+    image: pru-math-engine:latest
+    container_name: pru-math
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      # Talk to a host-side Ollama by default. Set OLLAMA_ENABLED=true
+      # only after pulling a model on the host (e.g. `ollama pull
+      # qwen2.5-math`).
+      OLLAMA_ENABLED: "false"
+      OLLAMA_HOST: "http://host.docker.internal:11434"
+      OLLAMA_MODEL: "qwen2.5-math"
+      # Set to "true" to publish a server that won't accept new solves
+      # — useful when sharing a snapshot of accumulated knowledge.
+      PRU_READ_ONLY: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pru-math-engine"
+version = "0.10.0"
+description = "A learning, auditable, relational math reasoner. Not a math solver — a layer above SymPy / numeric / Z3 that decides which tool to call, learns from outcomes, and exposes every decision as an inspectable graph."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "PRU Math Engine contributors" }]
+keywords = [
+    "math", "symbolic", "sympy", "z3", "reasoning", "learning",
+    "graph", "verifier", "interpretable",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "sympy>=1.12",
+    "mpmath>=1.3.0",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "networkx>=3.2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.6",
+    "antlr4-python3-runtime==4.11",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+z3 = ["z3-solver>=4.13"]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+all = ["z3-solver>=4.13"]
+
+[project.urls]
+Homepage      = "https://github.com/CandanUmut/math_engine"
+Source        = "https://github.com/CandanUmut/math_engine"
+Issues        = "https://github.com/CandanUmut/math_engine/issues"
+Documentation = "https://github.com/CandanUmut/math_engine#readme"
+
+[project.scripts]
+# Existing CLI: `pru-math "Eq(x**2 - 4, 0)"`
+pru-math        = "pru_math.__main__:main"
+# New: `pru-math-server --host 0.0.0.0 --port 8000`
+pru-math-server = "pru_math.server:main"
+
+[tool.setuptools]
+include-package-data = true
+# Opt out of new setuptools' automatic License-File metadata (Metadata
+# 2.4, which older twine versions reject). The license is declared via
+# the OSI classifier above and the LICENSE file ships in the sdist.
+license-files = []
+
+[tool.setuptools.packages.find]
+include = ["pru_math*"]
+exclude = ["tests*"]
+
+# Bundle the static frontend (HTML/CSS/JS) so `pip install` ships the
+# same UI the source checkout serves.
+[tool.setuptools.package-data]
+pru_math = ["frontend/*.html", "frontend/static/*.js", "frontend/static/*.css"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:antlr4.*",
+]

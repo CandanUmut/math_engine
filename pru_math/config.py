@@ -33,6 +33,7 @@ class Config:
     max_attempts: int
     learner_exploration: float
     cross_verify: bool
+    read_only: bool
 
 
 def load_config() -> Config:
@@ -48,6 +49,7 @@ def load_config() -> Config:
         max_attempts=int(os.getenv("PRU_MAX_ATTEMPTS", "3")),
         learner_exploration=float(os.getenv("PRU_LEARNER_EXPLORATION", "1.0")),
         cross_verify=os.getenv("PRU_CROSS_VERIFY", "false").lower() in {"1", "true", "yes"},
+        read_only=os.getenv("PRU_READ_ONLY", "false").lower() in {"1", "true", "yes"},
     )
 
 
