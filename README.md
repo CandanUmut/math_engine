@@ -33,6 +33,7 @@ signature classes get flagged with their working fallback.
 | 6     | Operational hardening (timeouts, settings, export, autoscan)| **done** |
 | 7     | Reasoning quality (identity-aware ranking, transitivity)    | **done** |
 | 8     | Notebook sessions · Ollama narrator                         | **done** |
+| 9     | Rewrite-based search using verified identities              | **done** |
 
 The Phase 5 success criterion — "the system has proposed and verified at
 least one identity or shortcut that was not explicitly given to it" —
@@ -85,6 +86,19 @@ with `uses_rule` edges back to the supporting problems.
 - **Self-confidence as tiebreak**: each tool's `can_handle(fingerprint)` returns a confidence in `[0, 1]`. The registry sorts candidates by confidence; the learner uses original input order as a deterministic tiebreaker so a cold-start problem prefers the high-confidence tool's approach.
 - **`GET /tools`** lists every registered tool with its availability and class name.
 - **End-to-end**: with the default registry (SymPy + numeric + Z3, Wolfram unavailable), `Integral(x**2, (x, 0, 1))` is solved by SymPy and cross-verified `agree` by numeric quadrature; quadratics are solved by `sympy.roots` and cross-verified by either numeric or Z3 depending on which is picked first.
+
+### What Phase 9 adds
+
+The hypothesizer's verified identities are no longer just ranking
+hints — they're now usable as **rewriting rules** during solving.
+This is the deepest claim of the project made tangible: the engine
+gets smarter without retraining a single weight.
+
+- **`pru_math/rewriter.py`** turns verified `identity` hypotheses into `RewriteRule` objects. Each rule's LHS is rendered as a SymPy `Wild`-based pattern so `sin(x)**2 + cos(x)**2 ≡ 1` matches `sin(y)**2 + cos(y)**2` without per-variable configuration. Both directions are considered, but a direction is dropped when the target side has free symbols the source can't bind (so `1 → sin(x)**2 + cos(x)**2` is correctly skipped).
+- **Pattern matching is two-stage**: a direct `expr.replace(pattern, template)` first, and — when the pattern is an `Add` — a sub-Add subset match using a `Wild('_rest')` so `sin(z)**2 + cos(z)**2 - 1` is matched as `pattern + (-1)` and rewritten to `1 + (-1) = 0`. This catches the case SymPy's plain `replace` misses (an `Add` of three terms doesn't structurally contain a sub-Add of two).
+- **Post-failure phase in the reasoner**: rewriting fires *only* when the primary multi-attempt loop fails to produce a verified result. The existing flow is untouched. Each rewrite generates a fresh `ParsedProblem` and runs through the same `registry.solve_with` toolchain. **Verification still runs against the *original* problem**, so the engine never claims `x is the answer to A` when it actually solved `B` — the audit story stays clean.
+- **New trace step kind**: `rewrite`. The trace shows the rule id, direction, the LHS → RHS strings, and the rewritten expression. The matching `tool_call` step carries `rewrite_via_rule` metadata. Persisted attempts on rewrites include a `(rewrite via rule #N)` step entry so they're identifiable in `attempts.steps_json`.
+- **Settable**: `enable_rewriting` (default `true`) and `max_rewrite_attempts` (default `2`) are both runtime-settable from the cog menu, so users can switch the phase off entirely or tighten the budget.
 
 ### What Phase 8 adds
 
@@ -223,6 +237,7 @@ translates language into a SymPy-parseable expression. See
 | `pru_math/exporter.py`              | **Phase 6** — single-bundle DB + graph export / atomic import |
 | `pru_math/rules.py`                 | **Phase 7** — graph traversal from a fingerprint to verified-rule witnesses |
 | `pru_math/narrator.py`              | **Phase 8** — Ollama-backed plain-English narration of a stored trace (with deterministic fallback) |
+| `pru_math/rewriter.py`              | **Phase 9** — verified identities → rewriting rules; direct + sub-Add subset matching |
 | `pru_math/tools/numeric_tool.py`    | **Phase 4** — scipy / mpmath fallback (`numeric.fsolve`, `numeric.brentq`, `numeric.quad`, `numeric.evalf`) |
 | `pru_math/tools/z3_tool.py`         | **Phase 4** — Z3 SMT backend with SymPy→Z3 translator (graceful when missing) |
 | `pru_math/tools/wolfram_tool.py`    | **Phase 4** — optional HTTP backend, gated by `WOLFRAM_APP_ID` |
@@ -237,7 +252,7 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-169 tests covering the parser (three formats), fingerprint determinism
+183 tests covering the parser (three formats), fingerprint determinism
 and similarity, SymPy tool dispatch for every supported problem type,
 the verifier against correct and wrong candidates, the SQLite store,
 the graph (node/edge add, similarity edges, persistence round-trip,
