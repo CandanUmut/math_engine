@@ -102,6 +102,53 @@ def infer_type_from_expr(expr: sp.Basic) -> str:
 
 # --- SymPy-syntax path ------------------------------------------------------
 
+_NL_KEYWORD_PATTERN = re.compile(
+    r"\b(solve|integrate|integral|differentiate|derivative|simplify|factor|"
+    r"expand|evaluate|compute|find|prove|show|limit|series|root|zero|"
+    r"what|how|the|equals?|equal|plus|minus|times|over|squared|cubed|"
+    r"approaches?)\b",
+    re.I,
+)
+
+
+def _looks_like_nl_artifact(text: str, expr: sp.Basic) -> bool:
+    """Heuristic: detect when SymPy's parser ate a natural-language phrase
+    by splitting words into single-letter symbol products.
+
+    Example: "solve 2 + 5" parses to ``s*o*l*v*e*2 + 5`` because
+    ``implicit_multiplication_application`` includes ``split_symbols``.
+    Such results carry no operator the user typed.
+
+    Returns True if the input contains an NL keyword (solve/integrate/etc.)
+    AND the parsed expression contains a Mul of multiple single-letter
+    Symbols that the user did not actually write as a product.
+    """
+    if not _NL_KEYWORD_PATTERN.search(text):
+        return False
+    # If the user typed any '*', they meant multiplication — trust the parse.
+    if "*" in text:
+        return False
+    # Walk the expression tree looking for a Mul of >=2 single-letter Symbols.
+    for node in sp.preorder_traversal(expr):
+        if isinstance(node, sp.Mul):
+            single_letter_syms = [
+                a for a in node.args
+                if isinstance(a, sp.Symbol) and len(a.name) == 1
+            ]
+            if len(single_letter_syms) >= 2:
+                # Verify those letters appear consecutively in the input as a
+                # word (so we know SymPy split it). This avoids false positives
+                # on legitimate inputs like "x*y*z".
+                names = [s.name for s in single_letter_syms]
+                joined = "".join(sorted(names))
+                # Look for any 2+ letter word in the input whose sorted letters
+                # contain those single-letter symbol names.
+                for word in re.findall(r"[A-Za-z]{2,}", text):
+                    if all(c in word.lower() for c in joined):
+                        return True
+    return False
+
+
 def try_parse_sympy(text: str) -> sp.Basic | None:
     """Parse as SymPy source. Returns ``None`` on failure — never raises."""
     stripped = text.strip()
@@ -116,13 +163,18 @@ def try_parse_sympy(text: str) -> sp.Basic | None:
                      "sin", "cos", "tan", "exp", "log", "sqrt", "pi", "E", "I", "oo")
     }
     try:
-        return parse_expr(stripped, local_dict=local_dict,
+        expr = parse_expr(stripped, local_dict=local_dict,
                           transformations=TRANSFORMATIONS, evaluate=False)
     except Exception:
         # sympy can raise a wide zoo: SympifyError, TokenError, SyntaxError,
         # AttributeError (when a wrapper class like Eq rejects weird args),
         # TypeError, ValueError, and more. Any of these means "not SymPy syntax".
         return None
+    # Reject natural-language artifacts: e.g. "solve 2 + 5" parsed as
+    # `s*o*l*v*e*2 + 5`. Falls through to LaTeX/NL paths in `parse()`.
+    if _looks_like_nl_artifact(stripped, expr):
+        return None
+    return expr
 
 
 # --- LaTeX path -------------------------------------------------------------
@@ -230,7 +282,12 @@ def try_parse_natural_language(
         return None
     model = model or CONFIG.ollama_model
     host = host or CONFIG.ollama_host
-    timeout = CONFIG.tool_timeout_s if timeout is None else timeout
+    # NL parsing via Ollama is independent from tool_timeout_s — reasoning
+    # models (deepseek-r1, gpt-oss) emit chain-of-thought before the JSON,
+    # so the SymPy-tool budget of ~20s is too tight. Allow up to 60s by
+    # default, overridable per call.
+    if timeout is None:
+        timeout = max(CONFIG.tool_timeout_s, 60.0)
 
     try:
         raw = _ollama_chat(text, system=_OLLAMA_SYSTEM_PROMPT,

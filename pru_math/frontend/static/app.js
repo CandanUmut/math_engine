@@ -7,8 +7,78 @@ const fmtNum = (n, d = 2) =>
   Number.isFinite(n) ? Number(n).toFixed(d) : "–";
 
 const VERIFY_CLS = (s) =>
-  s === "verified" ? "good" : s === "refuted" ? "bad" : s ? "warn" : "";
+  s === "verified"  ? "good"
+  : s === "refuted" ? "bad"
+  : s === "no_change" ? "warn"
+  : s ? "warn" : "";
+const VERIFY_LABEL = (s) =>
+  s === "no_change" ? "no change" : (s || "");
 const CV_CLS = (s) => (s ? `cv-${s}` : "");
+
+/* ── Intent (Phase A) ──────────────────────────────────────────────── */
+let activeIntent = "auto";
+
+/* ── Phase E: toast notifications ──────────────────────────────────── */
+function toast(message, type = "info", duration = 3500) {
+  const stack = $("toast-stack");
+  if (!stack) { console.log("toast:", message); return; }
+  const el = document.createElement("div");
+  el.className = `toast toast-${type}`;
+  el.innerHTML = `<span class="toast-icon">${
+    type === "success" ? "✓" : type === "error" ? "!" : type === "warn" ? "⚠" : "ℹ"
+  }</span><span class="toast-msg">${escapeHtml(message)}</span>
+  <button class="toast-close" aria-label="close">×</button>`;
+  stack.appendChild(el);
+  const close = () => { el.classList.add("toast-out"); setTimeout(() => el.remove(), 240); };
+  el.querySelector(".toast-close").addEventListener("click", close);
+  if (duration > 0) setTimeout(close, duration);
+  return close;
+}
+
+/* ── Examples (Phase A) ────────────────────────────────────────────── */
+const EXAMPLES = {
+  algebra: [
+    { input: "Eq(x**2 - 5*x + 6, 0)",        intent: "auto",   note: "quadratic — should give [2, 3]" },
+    { input: "Eq(x**3 - 6*x**2 + 11*x - 6, 0)", intent: "auto", note: "cubic — three real roots" },
+    { input: "x**4 - 16",                    intent: "factor", note: "factor difference of 4th powers" },
+    { input: "(x + 1)**3",                   intent: "expand", note: "expand a binomial" },
+    { input: "Eq(2*x + 3*y, 12)",            intent: "auto",   note: "linear in two variables" },
+    { input: "Eq(2*x**2 - 5*x - 3, 0)",      intent: "auto",   note: "Z3 picks this up" },
+  ],
+  calculus: [
+    { input: "Integral(x**2, (x, 0, 1))",      intent: "auto", note: "definite integral → 1/3" },
+    { input: "Integral(sin(x), x)",            intent: "auto", note: "indefinite integral → -cos(x)" },
+    { input: "Derivative(x**3, x)",            intent: "auto", note: "derivative → 3x²" },
+    { input: "Limit(sin(x)/x, x, 0)",          intent: "auto", note: "classic limit → 1" },
+    { input: "Limit((1 + 1/n)**n, n, oo)",     intent: "auto", note: "Euler's e" },
+    { input: "Integral(exp(-x**2), (x, 0, oo))", intent: "auto", note: "Gaussian half — √π/2" },
+  ],
+  trig: [
+    { input: "sin(x)**2 + cos(x)**2",          intent: "simplify", note: "Pythagorean → 1" },
+    { input: "cosh(x)**2 - sinh(x)**2",        intent: "simplify", note: "hyperbolic → 1" },
+    { input: "tan(x)",                         intent: "simplify", note: "for identity-pair with sin/cos" },
+    { input: "sin(x)/cos(x)",                  intent: "simplify", note: "tan-identity partner" },
+    { input: "sin(2*x)",                       intent: "simplify", note: "double-angle partner" },
+    { input: "2*sin(x)*cos(x)",                intent: "simplify", note: "double-angle expanded" },
+  ],
+  hard: [
+    { input: "Eq(cos(x) - x, 0)",              intent: "auto", note: "Dottie number ≈ 0.7390851 (numeric)" },
+    { input: "Eq(x**5 - x - 1, 0)",            intent: "auto", note: "no closed form — numeric brentq" },
+    { input: "Eq(sin(x) - x/2, 0)",            intent: "auto", note: "transcendental; numeric" },
+    { input: "Integral(1/(1 + x**2), (x, -oo, oo))", intent: "auto", note: "improper → π" },
+    { input: "Integral(log(x)/(1 + x**2), (x, 0, oo))", intent: "auto", note: "Catalan-class integral" },
+    { input: "Eq(exp(x) - 2, 0)",              intent: "auto", note: "should give log(2)" },
+  ],
+  nl: [
+    { input: "what is the integral of x squared from 0 to 1", intent: "auto", note: "via local Ollama" },
+    { input: "differentiate sin(x) times x",                  intent: "auto", note: "" },
+    { input: "factor x squared minus four",                   intent: "auto", note: "" },
+    { input: "what is the limit of sin x over x as x approaches 0", intent: "auto", note: "" },
+    { input: "what is two plus five",                         intent: "auto", note: "" },
+    { input: "solve x squared minus nine equals zero",        intent: "auto", note: "" },
+  ],
+};
+let activeExampleCat = "algebra";
 
 function tag(text, cls = "") {
   if (text === null || text === undefined || text === "") return "";
@@ -101,8 +171,9 @@ async function loadSimilarFor(problemId) {
 
 function renderVerificationTag(status) {
   if (!status) return "";
-  const cls = status === "verified" ? "good" : status === "refuted" ? "bad" : "warn";
-  return `<span class="tag ${cls}">verify: ${status}</span>`;
+  const cls = VERIFY_CLS(status);
+  const label = VERIFY_LABEL(status);
+  return `<span class="tag ${cls}">verify: ${label}</span>`;
 }
 
 function renderSimilar(items) {
@@ -127,12 +198,40 @@ function renderSimilar(items) {
 }
 
 function renderOutcome(out) {
+  lastSolveOutcome = out;
   $("answer-card").hidden = false;
   $("trace-card").hidden = false;
   $("fp-card").hidden = false;
   $("similar-card").hidden = false;
 
-  $("answer").textContent = out.answer_pretty ?? out.error ?? "(no answer)";
+  const answerText = out.answer_pretty ?? out.error ?? "(no answer)";
+  $("answer").textContent = answerText;
+  // Phase F: KaTeX-rendered answer (if it's a math expression — refused otherwise)
+  const rendered = $("answer-rendered");
+  if (rendered) {
+    if (out.answer_pretty && !out.error) {
+      try {
+        // Strip outer brackets for "list of roots" case so KaTeX renders cleanly.
+        let src = String(out.answer_pretty);
+        if (/^\[.+\]$/.test(src)) {
+          // List of roots — render as a comma-separated set.
+          src = "\\left\\{" + sympyToLatex(src.slice(1, -1)) + "\\right\\}";
+        } else {
+          src = sympyToLatex(src);
+        }
+        renderKaTeXInto(rendered, src, true);
+        rendered.hidden = false;
+        $("answer").hidden = true;
+        $("answer-toggle-render").textContent = "show raw";
+      } catch (_) {
+        rendered.hidden = true;
+        $("answer").hidden = false;
+      }
+    } else {
+      rendered.hidden = true;
+      $("answer").hidden = false;
+    }
+  }
 
   const meta = [];
   if (out.problem_type) meta.push(`<span class="tag">${escapeHtml(out.problem_type)}</span>`);
@@ -161,14 +260,89 @@ function renderOutcome(out) {
   $("fp").textContent = JSON.stringify(out.fingerprint, null, 2);
 }
 
+/* Phase C: trace timeline — icons, colored bars, decision-step
+ * candidate chart, "why this won" pull-out. */
+const TRACE_ICONS = {
+  parse:        "📝",
+  fingerprint:  "🧩",
+  retrieval:    "🔗",
+  decision:     "⚖️",
+  tool_call:    "🛠",
+  verify:       "✓",
+  cross_verify: "⚖",
+  persist:      "💾",
+  learn:        "📈",
+  graph_update: "🕸",
+  rewrite:      "✂",
+  auto_scan:    "🔬",
+};
+function traceIcon(kind) { return TRACE_ICONS[kind] || "•"; }
+function traceKindLabel(kind) {
+  return (kind || "").replace(/_/g, " ");
+}
+
+function traceToMarkdown(out) {
+  const lines = [];
+  lines.push(`# Solve: ${out.parsed_pretty || out.answer_pretty || "(unknown)"}\n`);
+  if (out.problem_id != null) lines.push(`Problem #${out.problem_id}.`);
+  if (out.problem_type) lines.push(`Type: \`${out.problem_type}\` · format: \`${out.source_format || "?"}\``);
+  if (out.tool && out.approach) {
+    lines.push(`Chosen: \`${out.tool}.${out.approach.replace(/^[^.]+\./, "")}\``);
+  }
+  if (out.verification_status) {
+    lines.push(`Verification: **${out.verification_status}** ${out.verification_detail ? `— _${out.verification_detail}_` : ""}`);
+  }
+  if (out.answer_pretty) {
+    lines.push("");
+    lines.push("## Answer");
+    lines.push("```");
+    lines.push(String(out.answer_pretty));
+    lines.push("```");
+  }
+  lines.push("");
+  lines.push("## Trace");
+  for (const s of (out.trace || [])) {
+    lines.push(`- **${traceKindLabel(s.kind)}** — ${s.summary || ""}`);
+  }
+  return lines.join("\n");
+}
+let lastSolveOutcome = null;
+async function copyTraceAsMarkdown() {
+  if (!lastSolveOutcome) return;
+  const md = traceToMarkdown(lastSolveOutcome);
+  try {
+    await navigator.clipboard.writeText(md);
+    const b = $("trace-copy-md");
+    if (b) {
+      const orig = b.textContent;
+      b.textContent = "copied ✓";
+      setTimeout(() => { b.textContent = orig; }, 1500);
+    }
+  } catch (_) {
+    // Fallback: open prompt with the text
+    prompt("Copy this markdown:", md);
+  }
+}
+
 function renderTrace(steps) {
-  $("trace").innerHTML = steps.map((s) => {
-    const kindClass = `k-${(s.kind || "").replace(/[^a-z_]/gi, "")}`;
+  const host = $("trace");
+  if (!host) return;
+  host.innerHTML = steps.map((s, i) => {
+    const k = s.kind || "step";
+    const cls = `k-${k.replace(/[^a-z_]/gi, "")}`;
     const detail = renderTraceDetail(s);
-    return `<li>
-      <span class="kind ${kindClass}">${escapeHtml(s.kind)}</span>
-      <span class="summary">${escapeHtml(s.summary || "")}</span>
-      ${detail}
+    return `<li class="trace-step trace-step-${k}">
+      <div class="trace-step-rail">
+        <div class="trace-step-icon ${cls}">${traceIcon(k)}</div>
+        ${i < steps.length - 1 ? '<div class="trace-step-line"></div>' : ""}
+      </div>
+      <div class="trace-step-body">
+        <div class="trace-step-head">
+          <span class="kind ${cls}">${escapeHtml(traceKindLabel(k))}</span>
+          <span class="summary">${escapeHtml(s.summary || "")}</span>
+        </div>
+        ${detail}
+      </div>
     </li>`;
   }).join("");
 }
@@ -267,14 +441,28 @@ async function refreshToolsBar() {
 }
 
 async function submitSolve() {
-  const text = $("input").value.trim();
+  let text = $("input").value.trim();
   if (!text) return;
+  // Intent-driven client-side wrapping for solve/integrate/differentiate.
+  // factor/expand/simplify/limit/evaluate go through the new
+  // problem_type override field (handled below).
+  let problemType = null;
+  if (activeIntent === "solve") {
+    text = wrapAsEquation(text);
+  } else if (activeIntent === "integrate") {
+    text = wrapAsIntegral(text);
+  } else if (activeIntent === "differentiate") {
+    text = wrapAsDerivative(text);
+  } else if (["factor", "expand", "simplify", "limit", "evaluate"].includes(activeIntent)) {
+    problemType = activeIntent;
+  }
   const btn = $("solve-btn");
   btn.disabled = true;
   $("hint").textContent = "Solving…";
   try {
     const body = { text };
     if (activeSessionId !== null) body.session_id = activeSessionId;
+    if (problemType) body.problem_type = problemType;
     const r = await fetch("/solve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -295,6 +483,282 @@ async function submitSolve() {
     refreshStats();
     refreshRecent();
     if (activeSessionId !== null) refreshNotebook();
+  }
+}
+
+/* Intent-driven wrappers: turn a bare expression into the SymPy class
+ * the parser dispatches on. Pure client-side — no parser change. */
+function wrapAsEquation(text) {
+  const t = text.trim();
+  if (/^Eq\s*\(/.test(t)) return t;            // already wrapped
+  if (t.includes("=") && !t.includes("==")) {
+    const idx = t.indexOf("=");
+    const lhs = t.slice(0, idx).trim();
+    const rhs = t.slice(idx + 1).trim() || "0";
+    return `Eq(${lhs}, ${rhs})`;
+  }
+  return `Eq(${t}, 0)`;
+}
+function wrapAsIntegral(text) {
+  const t = text.trim();
+  if (/^Integral\s*\(/.test(t)) return t;
+  // No bounds → indefinite over x. The user can write Integral(...) directly
+  // to specify limits.
+  return `Integral(${t}, x)`;
+}
+function wrapAsDerivative(text) {
+  const t = text.trim();
+  if (/^Derivative\s*\(/.test(t)) return t;
+  return `Derivative(${t}, x)`;
+}
+
+/* ── Phase B: live ranker preview ─────────────────────────────────── */
+let rankerPreviewTimer = null;
+let lastRankerInput = "";
+let lastRankerSignal = null;        // {problem_type, signature, candidates}
+
+function inferProblemTypeForPreview(text, intent) {
+  if (intent && intent !== "auto") return intent;
+  const t = text.trim();
+  if (/^Eq\s*\(/.test(t) || /=/.test(t)) return "solve";
+  if (/^Integral\s*\(/.test(t)) return "integrate";
+  if (/^Derivative\s*\(/.test(t)) return "differentiate";
+  if (/^Limit\s*\(/.test(t)) return "limit";
+  if (/^Sum\s*\(/.test(t)) return "evaluate";
+  return null;        // unknown; ranker preview not useful
+}
+
+async function updateRankerPreview() {
+  const text = $("input").value.trim();
+  const card = $("ranker-preview-card");
+  if (!card) return;
+  if (!text) { card.hidden = true; return; }
+
+  const ptype = inferProblemTypeForPreview(text, activeIntent);
+  if (!ptype) { card.hidden = true; return; }
+
+  const cacheKey = `${ptype}::${text}`;
+  if (cacheKey === lastRankerInput && lastRankerSignal) {
+    return;     // already showing
+  }
+  try {
+    // Use type-level rank (no signature) — fast, doesn't require parsing
+    // the input on the server. The decision step in the real solve will
+    // narrow to signature-specific.
+    const r = await fetch(`/learner/rank?problem_type=${encodeURIComponent(ptype)}`);
+    if (!r.ok) { card.hidden = true; return; }
+    const data = await r.json();
+    lastRankerInput = cacheKey;
+    lastRankerSignal = data;
+    card.hidden = false;
+    $("ranker-preview-hint").textContent =
+      `Type-level UCB1 ranking for problem_type=${ptype}. The engine will narrow to your specific signature when you click Solve.`;
+    $("ranker-preview-body").innerHTML = renderCandidateTable(data.candidates || []);
+  } catch (_) {
+    card.hidden = true;
+  }
+}
+
+function scheduleRankerPreview() {
+  clearTimeout(rankerPreviewTimer);
+  rankerPreviewTimer = setTimeout(updateRankerPreview, 350);
+}
+
+/* ── Phase B: replay ──────────────────────────────────────────────── */
+async function replayCurrentSolve() {
+  // Re-run the same input + intent without persisting anything special.
+  // Same code path as submitSolve so the user can compare ranker
+  // rationale "before" and "after" learning.
+  await submitSolve();
+}
+
+/* ── Phase B: demo guided tour ────────────────────────────────────── */
+const DEMO_STEPS = [
+  {
+    title: "Reset learning state",
+    body: "Wipe all problems, attempts, and hypotheses. The graph goes back to empty. Click <b>reset learning state</b> at the bottom of this rail. Stats in the topbar should drop to zero.",
+    action: "Click <b>reset learning state</b> below.",
+  },
+  {
+    title: "Solve a fresh quadratic",
+    body: "Notice the trace's <b>decision</b> step says &quot;<i>unseen — neutral prior 50%</i>&quot;. The engine has no data yet.",
+    input: "Eq(x**2 - 5*x + 6, 0)",
+    intent: "auto",
+  },
+  {
+    title: "Solve four more quadratics",
+    body: "Each new quadratic feeds <code>tool_outcomes</code>. UCB1 explores; later attempts will exploit. The decision rationale shifts from <i>neutral prior</i> to <i>type N/M verified</i>.",
+    inputs: [
+      "Eq(x**2 - 4*x + 3, 0)",
+      "Eq(x**2 - 7*x + 12, 0)",
+      "Eq(x**2 - 9*x + 20, 0)",
+      "Eq(2*x**2 - 5*x - 3, 0)",
+    ],
+    intent: "auto",
+  },
+  {
+    title: "Seed an identity pair",
+    body: "Solve <code>sin(x)**2 + cos(x)**2</code> with the <b>simplify</b> intent, then solve <code>1</code>. The engine sees two inputs that canonicalize to the same value.",
+    inputs: [
+      { text: "sin(x)**2 + cos(x)**2", intent: "simplify" },
+      { text: "1", intent: "auto" },
+    ],
+  },
+  {
+    title: "Run the hypothesizer",
+    body: "Switch to the <b>Hypotheses</b> tab and click <b>scan now</b>. The engine will independently propose and prove <code>sin²(x) + cos²(x) ≡ 1</code>. A new <code>rule</code> node appears in the relational graph with <code>uses_rule</code> edges back to the supporting problems.",
+    action: "Open the Hypotheses tab and click <b>scan now</b>.",
+  },
+  {
+    title: "Use the learned identity",
+    body: "Solve <code>(sin(x)**2 + cos(x)**2)*y</code> with <b>simplify</b>. If the primary attempts can't verify, the rewriter fires (look for a <i>rewrite</i> step in the trace) and substitutes the just-proved identity. Same engine — strictly smarter than two minutes ago.",
+    input: "(sin(x)**2 + cos(x)**2)*y",
+    intent: "simplify",
+  },
+];
+
+function renderDemoSteps() {
+  const host = $("demo-steps");
+  if (!host) return;
+  host.innerHTML = DEMO_STEPS.map((s, i) => {
+    const inputBtns = [];
+    if (s.input) {
+      inputBtns.push(`<button class="subtle-btn demo-run" data-step="${i}" data-idx="0">load &amp; solve</button>`);
+    } else if (s.inputs) {
+      inputBtns.push(`<button class="subtle-btn demo-run-all" data-step="${i}">load &amp; solve all (${s.inputs.length})</button>`);
+    }
+    return `<li class="demo-step" data-step="${i}">
+      <div class="demo-step-num">${i + 1}</div>
+      <div class="demo-step-body">
+        <div class="demo-step-title">${escapeHtml(s.title)}</div>
+        <div class="demo-step-text">${s.body}</div>
+        ${s.action ? `<div class="demo-step-action">${s.action}</div>` : ""}
+        <div class="demo-step-actions">${inputBtns.join(" ")}</div>
+      </div>
+    </li>`;
+  }).join("");
+
+  // Wire single-input runs
+  host.querySelectorAll(".demo-run").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const step = DEMO_STEPS[Number(b.dataset.step)];
+      if (!step || !step.input) return;
+      $("input").value = step.input;
+      setIntent(step.intent || "auto");
+      activateTab("solve");
+      await submitSolve();
+      markDemoStepDone(Number(b.dataset.step));
+    });
+  });
+  // Wire multi-input runs (sequentially solve all)
+  host.querySelectorAll(".demo-run-all").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const step = DEMO_STEPS[Number(b.dataset.step)];
+      if (!step || !step.inputs) return;
+      activateTab("solve");
+      b.disabled = true;
+      const orig = b.textContent;
+      for (let i = 0; i < step.inputs.length; i++) {
+        const item = step.inputs[i];
+        const text = typeof item === "string" ? item : item.text;
+        const intent = (typeof item === "string" ? step.intent : item.intent) || step.intent || "auto";
+        $("input").value = text;
+        setIntent(intent);
+        b.textContent = `solving ${i + 1} / ${step.inputs.length}…`;
+        await submitSolve();
+      }
+      b.textContent = orig;
+      b.disabled = false;
+      markDemoStepDone(Number(b.dataset.step));
+    });
+  });
+}
+function markDemoStepDone(idx) {
+  const li = document.querySelector(`.demo-step[data-step="${idx}"]`);
+  if (li) li.classList.add("done");
+}
+function openDemoRail() {
+  $("demo-rail").hidden = false;
+  document.body.classList.add("demo-open");
+  renderDemoSteps();
+}
+function closeDemoRail() {
+  $("demo-rail").hidden = true;
+  document.body.classList.remove("demo-open");
+}
+async function demoResetState() {
+  if (!confirm("Wipe ALL problems, attempts, hypotheses, and the relational graph?\n\nSessions and config are kept. This cannot be undone.")) return;
+  $("demo-status").textContent = "resetting…";
+  try {
+    const r = await fetch("/db/reset", { method: "POST" });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.detail || "reset failed");
+    $("demo-status").textContent = `reset ✓ — ${JSON.stringify(data.counts)}`;
+    document.querySelectorAll(".demo-step").forEach((li) => li.classList.remove("done"));
+    refreshStats();
+    refreshRecent();
+    refreshToolsBar();
+    if (typeof refreshHypotheses === "function") refreshHypotheses();
+    // Hide answer/trace from previous session
+    ["answer-card","similar-card","attempts-card","trace-card","fp-card","ranker-preview-card"]
+      .forEach((id) => { const c = $(id); if (c) c.hidden = true; });
+  } catch (err) {
+    $("demo-status").textContent = "reset failed: " + err.message;
+  }
+}
+
+/* Examples drawer (Phase A) */
+function renderExamples() {
+  const host = $("examples-list");
+  if (!host) return;
+  const items = EXAMPLES[activeExampleCat] || [];
+  host.innerHTML = items.map((ex, i) => {
+    return `<button class="example-item" data-idx="${i}" type="button">
+      <code>${escapeHtml(ex.input)}</code>
+      ${ex.note ? `<span class="ex-note">${escapeHtml(ex.note)}</span>` : ""}
+      ${ex.intent && ex.intent !== "auto"
+        ? `<span class="ex-intent">intent: ${escapeHtml(ex.intent)}</span>`
+        : ""}
+    </button>`;
+  }).join("");
+  host.querySelectorAll(".example-item").forEach((b) => {
+    b.addEventListener("click", () => {
+      const idx = Number(b.dataset.idx);
+      const ex = items[idx];
+      if (!ex) return;
+      $("input").value = ex.input;
+      setIntent(ex.intent || "auto");
+      $("input").focus();
+    });
+  });
+}
+function setExampleCategory(cat) {
+  activeExampleCat = cat;
+  document.querySelectorAll(".ex-tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.cat === cat);
+  });
+  renderExamples();
+}
+function setIntent(intent) {
+  activeIntent = intent;
+  document.querySelectorAll(".intent-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.intent === intent);
+  });
+}
+function wireIntentAndExamples() {
+  document.querySelectorAll(".ex-tab").forEach((b) => {
+    b.addEventListener("click", () => setExampleCategory(b.dataset.cat));
+  });
+  document.querySelectorAll(".intent-btn").forEach((b) => {
+    b.addEventListener("click", () => setIntent(b.dataset.intent));
+  });
+  const cs = $("cheatsheet-toggle");
+  if (cs) {
+    cs.addEventListener("click", () => {
+      const sheet = $("cheatsheet");
+      sheet.hidden = !sheet.hidden;
+      cs.textContent = sheet.hidden ? "syntax help" : "hide help";
+    });
   }
 }
 
@@ -1023,7 +1487,7 @@ async function onNotebookAction(e) {
       refreshRecent();
       refreshNotebook();
     } catch (err) {
-      alert("delete failed: " + err.message);
+      toast("Delete failed: " + err.message, "error");
     }
     return;
   }
@@ -1040,7 +1504,7 @@ async function onNotebookAction(e) {
       if (!r.ok) throw new Error(await r.text());
       refreshNotebook();
     } catch (err) {
-      alert("move failed: " + err.message);
+      toast("Move failed: " + err.message, "error");
     }
     return;
   }
@@ -1087,13 +1551,13 @@ async function saveNotesEdit() {
     // Sync the small Solve-tab notes textarea + sessionsCache.
     await refreshSessions();
   } catch (err) {
-    alert("save failed: " + err.message);
+    toast("Save failed: " + err.message, "error");
   }
 }
 
 async function attachLastSolveToSession() {
   if (activeSessionId == null || lastSolvedProblemId == null) {
-    alert("Solve a problem first, then come back to this session.");
+    toast("Solve a problem first, then come back to this session.", "warn");
     return;
   }
   try {
@@ -1105,7 +1569,7 @@ async function attachLastSolveToSession() {
     if (!r.ok) throw new Error(await r.text());
     refreshNotebook();
   } catch (err) {
-    alert("attach failed: " + err.message);
+    toast("Attach failed: " + err.message, "error");
   }
 }
 
@@ -1126,7 +1590,7 @@ async function exportSessionBundle() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch (err) {
-    alert("export failed: " + err.message);
+    toast("Export failed: " + err.message, "error");
   }
 }
 
@@ -1226,7 +1690,7 @@ async function exportDb() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch (err) {
-    alert("export failed: " + err.message);
+    toast("Export failed: " + err.message, "error");
   }
 }
 
@@ -1247,18 +1711,142 @@ function importDbFile(file) {
         throw new Error(`HTTP ${r.status}: ${msg}`);
       }
       const out = await r.json();
-      alert(`imported: ${JSON.stringify(out.counts)}`);
+      toast("Imported " + JSON.stringify(out.counts), "success");
       refreshStats();
       refreshRecent();
       if (currentDbView) loadDbTable(currentDbView);
     } catch (err) {
-      alert("import failed: " + err.message);
+      toast("Import failed: " + err.message, "error");
     }
   };
   reader.readAsText(file);
 }
 
 /* ── Hypotheses tab (Phase 5) ─────────────────────────────────────── */
+
+/* ── Phase D: SymPy text → LaTeX (lightweight) ────────────────────── */
+function sympyToLatex(s) {
+  if (s == null) return "";
+  let t = String(s);
+  // Constants
+  t = t.replace(/\boo\b/g, "\\infty");
+  t = t.replace(/\bpi\b/g, "\\pi");
+  t = t.replace(/\bE\b(?![a-z_(])/g, "e");
+  t = t.replace(/\bI\b(?![a-z_(])/g, "i");
+  // sqrt(x) → \sqrt{x}  (single nesting depth)
+  t = t.replace(/\bsqrt\s*\(([^()]*)\)/g, "\\sqrt{$1}");
+  // Function names: sin cos tan asin acos atan sinh cosh tanh exp log ln
+  t = t.replace(/\b(sin|cos|tan|asin|acos|atan|sinh|cosh|tanh|exp|log|ln|sec|csc|cot)\b/g, "\\$1");
+  // a**b — wrap exponent in braces. Multi-char exponents need braces.
+  t = t.replace(/\*\*\s*\(([^()]+)\)/g, "^{$1}");
+  t = t.replace(/\*\*\s*([A-Za-z]\w*|\d+)/g, "^{$1}");
+  // Multiplication: turn `*` into a thin space (KaTeX juxtaposition is implicit)
+  t = t.replace(/\s*\*\s*/g, " \\, ");
+  return t;
+}
+
+function renderKaTeXInto(el, src, displayMode = false) {
+  if (!el) return;
+  if (typeof katex === "undefined") {
+    el.textContent = src;
+    return;
+  }
+  try {
+    katex.render(src, el, { throwOnError: false, displayMode, output: "html" });
+  } catch (_) {
+    el.textContent = src;
+  }
+}
+
+/* Identity wall (Phase D): verified identities, big and pretty.
+ * One card per hypothesis, LHS ≡ RHS rendered with KaTeX. */
+function renderIdentityWall(hypotheses) {
+  const host = $("identity-wall");
+  if (!host) return;
+  const identities = (hypotheses || []).filter(
+    (h) => h.kind === "identity" && h.status === "verified"
+  );
+  const others = (hypotheses || []).filter(
+    (h) => h.kind !== "identity" && h.status === "verified"
+  );
+  if (!identities.length && !others.length) {
+    host.innerHTML = `<div class="subtle" style="padding:24px;text-align:center">
+      <div style="font-size: 38px; opacity: 0.5">🔬</div>
+      <p>No verified hypotheses yet.</p>
+      <p>Solve pairs of equivalent expressions (e.g. <code>sin(x)**2 + cos(x)**2</code> and <code>1</code>) and click <b>scan now</b>.</p>
+    </div>`;
+    return;
+  }
+  const idHtml = identities.map((h) => {
+    const ev = h.evidence || {};
+    const lhs = ev.lhs_pretty || "?";
+    const rhs = ev.rhs_pretty || "?";
+    const supportIds = (ev.support_problem_ids || []).slice(0, 8);
+    const supportChips = supportIds.map((id) =>
+      `<button class="problem-chip" data-action="open-problem" data-id="${id}">#${id}</button>`
+    ).join("");
+    const latex = `${sympyToLatex(lhs)} \\;\\equiv\\; ${sympyToLatex(rhs)}`;
+    return `<div class="identity-card" data-id="${h.id}">
+      <div class="identity-card-head">
+        <span class="tag">#${h.id}</span>
+        <span class="tag good">${escapeHtml(h.method || "verified")}</span>
+        <button class="subtle-btn" data-action="try-identity"
+                data-text="${escapeHtml(lhs)}">try this in Solve</button>
+        <button class="subtle-btn" data-action="reverify" data-id="${h.id}">re-verify</button>
+      </div>
+      <div class="identity-math" data-latex="${escapeHtml(latex)}"></div>
+      <div class="identity-meta">
+        <span class="subtle">supports:</span>
+        ${supportChips || '<span class="subtle">(none)</span>'}
+        ${h.verification_detail ? `<span class="subtle" title="${escapeHtml(h.verification_detail)}">· ${escapeHtml(h.verification_detail.slice(0, 70))}</span>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  const otherHtml = others.length
+    ? `<div class="identity-other">
+        <h3>Other verified rules</h3>
+        ${others.map((h) => `<div class="identity-other-row">
+          <span class="tag kind-${escapeHtml(h.kind)}">${escapeHtml(h.kind)}</span>
+          <span>${escapeHtml(h.claim || "")}</span>
+        </div>`).join("")}
+      </div>`
+    : "";
+  host.innerHTML = idHtml + otherHtml;
+  // Render KaTeX
+  host.querySelectorAll(".identity-math").forEach((el) => {
+    const latex = el.dataset.latex || "";
+    renderKaTeXInto(el, latex, true);
+  });
+  // Wire actions
+  host.querySelectorAll('[data-action="try-identity"]').forEach((b) => {
+    b.addEventListener("click", () => {
+      $("input").value = b.dataset.text || "";
+      setIntent("simplify");
+      activateTab("solve");
+      $("input").focus();
+    });
+  });
+  host.querySelectorAll('[data-action="reverify"]').forEach((b) => {
+    b.addEventListener("click", () => reverifyHypothesis(b.dataset.id));
+  });
+  host.querySelectorAll('[data-action="open-problem"]').forEach((b) => {
+    b.addEventListener("click", () => {
+      activateTab("solve");
+      loadSimilarFor(b.dataset.id);
+    });
+  });
+}
+
+let activeHypView = "wall";
+function setHypView(view) {
+  activeHypView = view;
+  document.querySelectorAll(".hyp-subtab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === view);
+  });
+  $("identity-wall").hidden = view !== "wall";
+  $("hyp-list").hidden = view !== "raw";
+  refreshHypotheses();
+}
 
 async function refreshHypotheses() {
   const status = $("hyp-filter-status").value;
@@ -1268,19 +1856,32 @@ async function refreshHypotheses() {
   if (kind) params.set("kind", kind);
   params.set("limit", "200");
   const host = $("hyp-list");
-  host.innerHTML = '<div class="subtle" style="padding:12px">loading…</div>';
+  if (activeHypView === "raw") {
+    host.innerHTML = '<div class="subtle" style="padding:12px">loading…</div>';
+  } else {
+    $("identity-wall").innerHTML = '<div class="subtle" style="padding:12px">loading…</div>';
+  }
   try {
     const data = await fetch(`/hypotheses?${params}`).then((r) => r.json());
     const items = data.items || [];
-    if (!items.length) {
-      host.innerHTML = `<div class="subtle" style="padding:12px">
-        No hypotheses yet. Solve a few problems and click "scan now".
-      </div>`;
-      return;
+    // Always feed the identity wall (filtered to verified identities).
+    // For raw list, respect the selected status/kind filters.
+    if (activeHypView === "wall") {
+      // For the wall we want all kinds at all statuses, then filter.
+      const allData = await fetch("/hypotheses?limit=200").then((r) => r.json());
+      renderIdentityWall(allData.items || []);
+    } else {
+      if (!items.length) {
+        host.innerHTML = `<div class="subtle" style="padding:12px">
+          No hypotheses yet. Solve a few problems and click "scan now".
+        </div>`;
+        return;
+      }
+      host.innerHTML = items.map(renderHypothesisCard).join("");
     }
-    host.innerHTML = items.map(renderHypothesisCard).join("");
   } catch (err) {
-    host.innerHTML = `<div class="subtle" style="padding:12px">${escapeHtml(err.message)}</div>`;
+    const target = activeHypView === "raw" ? host : $("identity-wall");
+    target.innerHTML = `<div class="subtle" style="padding:12px">${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -1338,7 +1939,7 @@ async function triggerHypothesisScan() {
     await refreshHypotheses();
     refreshStats();
   } catch (err) {
-    alert("scan failed: " + err.message);
+    toast("Scan failed: " + err.message, "error");
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
@@ -1352,7 +1953,7 @@ async function reverifyHypothesis(id) {
     await refreshHypotheses();
     refreshStats();
   } catch (err) {
-    alert("re-verify failed: " + err.message);
+    toast("Re-verify failed: " + err.message, "error");
   }
 }
 
@@ -1385,6 +1986,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("trace-collapse")?.addEventListener("click", () => {
     if (traceList) traceList.querySelectorAll("details").forEach((d) => (d.open = false));
   });
+  $("trace-copy-md")?.addEventListener("click", copyTraceAsMarkdown);
 
   // Phase 8: sessions + explain
   $("session-select")?.addEventListener("change", onSessionSelect);
@@ -1425,6 +2027,72 @@ document.addEventListener("DOMContentLoaded", () => {
   $("hyp-list")?.addEventListener("click", (e) => {
     const btn = e.target.closest('[data-action="reverify"]');
     if (btn) reverifyHypothesis(btn.dataset.id);
+  });
+  // Phase D: hypotheses subtabs (Identity wall / All hypotheses)
+  document.querySelectorAll(".hyp-subtab").forEach((b) => {
+    b.addEventListener("click", () => setHypView(b.dataset.view));
+  });
+
+  // Phase A: examples drawer + intent buttons + cheatsheet
+  wireIntentAndExamples();
+  renderExamples();
+
+  // Phase B: live ranker preview as the user types
+  $("input")?.addEventListener("input", scheduleRankerPreview);
+  document.querySelectorAll(".intent-btn").forEach((b) =>
+    b.addEventListener("click", () => scheduleRankerPreview())
+  );
+  $("ranker-preview-close")?.addEventListener("click", () => {
+    $("ranker-preview-card").hidden = true;
+    lastRankerInput = "";
+  });
+  $("replay-btn")?.addEventListener("click", replayCurrentSolve);
+  $("answer-toggle-render")?.addEventListener("click", () => {
+    const rendered = $("answer-rendered");
+    const raw = $("answer");
+    const btn = $("answer-toggle-render");
+    if (rendered.hidden) {
+      rendered.hidden = false; raw.hidden = true;
+      btn.textContent = "show raw";
+    } else {
+      rendered.hidden = true; raw.hidden = false;
+      btn.textContent = "show rendered";
+    }
+  });
+
+  // Phase B: demo rail
+  $("open-demo")?.addEventListener("click", openDemoRail);
+  $("close-demo")?.addEventListener("click", closeDemoRail);
+  $("demo-reset")?.addEventListener("click", demoResetState);
+
+  // Phase E: keyboard shortcuts (global) + shortcut help modal
+  $("close-shortcuts")?.addEventListener("click", () => { $("shortcuts-modal").hidden = true; });
+  $("shortcuts-modal")?.addEventListener("click", (e) => {
+    if (e.target.id === "shortcuts-modal") $("shortcuts-modal").hidden = true;
+  });
+  document.addEventListener("keydown", (e) => {
+    const inField = e.target.matches("input, textarea, select");
+    if (e.key === "Escape") {
+      if (!$("shortcuts-modal").hidden) $("shortcuts-modal").hidden = true;
+      else if (!$("settings-modal").hidden) closeSettings();
+      else if (!$("demo-rail").hidden) closeDemoRail();
+      return;
+    }
+    if (inField) return;
+    if (e.altKey && /^[1-6]$/.test(e.key)) {
+      activateTab(TABS[Number(e.key) - 1]);
+      e.preventDefault();
+    } else if (e.key === "?" || (e.shiftKey && e.key === "/")) {
+      $("shortcuts-modal").hidden = false;
+      e.preventDefault();
+    } else if (e.key === "/" && !e.shiftKey) {
+      $("input")?.focus();
+      e.preventDefault();
+    } else if (e.key === "d" || e.key === "D") {
+      const open = !$("demo-rail").hidden;
+      open ? closeDemoRail() : openDemoRail();
+      e.preventDefault();
+    }
   });
 
   refreshStats();

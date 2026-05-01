@@ -250,6 +250,39 @@ def import_bundle(store: Store, graph: RelationalGraph,
     return counts
 
 
+def reset_state(store: Store, graph: RelationalGraph) -> dict[str, int]:
+    """Wipe all learning state — every row in every table, plus the
+    relational graph. Atomic: SQLite work runs in a single transaction.
+
+    Used by the "reset learning state" button in the UI's Demo flow so a
+    professor can rerun the demo from a blank slate without restarting
+    the server.
+
+    The schema itself stays intact; sessions and config are untouched.
+    """
+    counts: dict[str, int] = {}
+    with store._lock:                                        # noqa: SLF001
+        conn = store._conn                                   # noqa: SLF001
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for t in ("attempts", "problems", "tool_outcomes", "hypotheses"):
+                cur = conn.execute(f"DELETE FROM {t}")
+                counts[f"{t}_deleted"] = cur.rowcount or 0
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    # Drop the in-memory graph and persist immediately so subsequent
+    # solves rebuild from scratch.
+    import networkx as nx
+    graph._g = nx.MultiDiGraph()                             # noqa: SLF001
+    graph.save()
+    counts["graph_nodes"] = graph.node_count()
+    counts["graph_edges"] = graph.edge_count()
+    return counts
+
+
 def _encode_graph(graph: RelationalGraph) -> str:
     raw = pickle.dumps(graph.graph, protocol=pickle.HIGHEST_PROTOCOL)
     return base64.b64encode(raw).decode("ascii")

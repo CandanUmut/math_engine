@@ -43,6 +43,10 @@ class SolveRequest(BaseModel):
     text: str = Field(..., description="Math problem in SymPy, LaTeX, or natural language.")
     session_id: int | None = Field(default=None,
         description="Optional session to attach this problem to.")
+    problem_type: str | None = Field(default=None,
+        description="Optional override for problem_type. When set, the parser's "
+                    "inferred type is replaced. Used by the UI's intent buttons "
+                    "(solve / integrate / factor / expand / simplify / etc).")
 
 
 def _attempt_to_dict(a) -> dict[str, Any]:
@@ -138,7 +142,11 @@ def create_app(store: Store | None = None,
 
     @app.post("/solve")
     def solve(req: SolveRequest) -> dict[str, Any]:
-        outcome = reasoner.solve(req.text, session_id=req.session_id)
+        outcome = reasoner.solve(
+            req.text,
+            session_id=req.session_id,
+            problem_type_override=req.problem_type,
+        )
         return outcome.to_dict()
 
     @app.get("/problems")
@@ -268,6 +276,16 @@ def create_app(store: Store | None = None,
             counts = import_bundle(store, graph, body)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
+        return {"ok": True, "counts": counts}
+
+    @app.post("/db/reset")
+    def db_reset() -> dict[str, Any]:
+        """Wipe every problem, attempt, tool_outcome, and hypothesis;
+        reset the relational graph to empty. Sessions and config are
+        preserved so you can re-run the demo without losing your setup.
+        Used by the "reset learning state" button in the Demo flow."""
+        from .exporter import reset_state
+        counts = reset_state(store, graph)
         return {"ok": True, "counts": counts}
 
     # --- Explain (Phase 8) — Ollama narrates an existing trace ------------

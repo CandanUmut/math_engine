@@ -160,7 +160,13 @@ class Reasoner:
 
     # -------------------------------------------------------------------
 
-    def solve(self, text: str, *, session_id: int | None = None) -> SolveOutcome:
+    def solve(
+        self,
+        text: str,
+        *,
+        session_id: int | None = None,
+        problem_type_override: str | None = None,
+    ) -> SolveOutcome:
         trace: list[TraceStep] = []
 
         # 1. Parse
@@ -178,13 +184,28 @@ class Reasoner:
                 error=f"parse error: {exc}", trace=trace,
             )
 
+        # Optional UI-driven intent override: the user clicked an intent
+        # button (factor / expand / simplify / ...) so trust their declared
+        # problem type over the parser's inference. Only accepted for known
+        # problem types; ignored otherwise.
+        from . import problem_types as _PT
+        intent_applied = False
+        if problem_type_override and problem_type_override in _PT.ALL:
+            if problem_type_override != parsed.problem_type:
+                parsed.problem_type = problem_type_override
+                intent_applied = True
+
         trace.append(TraceStep(
             kind="parse",
-            summary=f"Parsed as {parsed.source_format} → problem_type={parsed.problem_type}",
+            summary=(
+                f"Parsed as {parsed.source_format} → problem_type={parsed.problem_type}"
+                + (f" (intent override applied)" if intent_applied else "")
+            ),
             detail={
                 "source_format": parsed.source_format,
                 "problem_type": parsed.problem_type,
                 "pretty": parsed.pretty(),
+                "intent_override": problem_type_override if intent_applied else None,
             },
         ))
 
@@ -603,6 +624,7 @@ class Reasoner:
                 "verified": 3,
                 "inconclusive": 2,
                 None: 1,
+                "no_change": 1,
                 "refuted": 0,
             }.get(a.verification_status, 1)
             return (v_rank, 1 if a.success else 0, -a.time_ms)

@@ -11,6 +11,9 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <!-- marked.js for the notebook view (Phase 11) -->
   <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
+  <!-- KaTeX for rendering math nicely (Phase D) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
 </head>
 <body>
   <header class="topbar">
@@ -38,9 +41,29 @@
       <span class="stat"><span class="stat-label">graph</span>
         <span id="stat-nodes">–</span>n / <span id="stat-edges">–</span>e
       </span>
+      <button id="open-demo" class="demo-btn" title="Watch the engine learn — guided tour">▶ Demo</button>
       <button id="open-settings" class="cog-btn" title="Settings">⚙</button>
     </div>
   </header>
+
+  <!-- ── Demo guided tour (Phase B) ──────────────────────────────────── -->
+  <aside id="demo-rail" class="demo-rail" hidden>
+    <div class="demo-rail-header">
+      <h2>Demo — watch it learn</h2>
+      <button id="close-demo" class="subtle-btn">close</button>
+    </div>
+    <p class="hint demo-rail-intro">
+      Six scripted steps that show the engine getting smarter without
+      retraining. Each step is one click. The trace, ranker, and
+      hypotheses panes update live so a viewer sees the change.
+    </p>
+    <ol id="demo-steps" class="demo-steps"></ol>
+    <div class="demo-rail-footer">
+      <button id="demo-reset" class="subtle-btn"
+              title="Wipe all learning state — start the demo from a blank slate">⟲ reset learning state</button>
+      <span id="demo-status" class="subtle"></span>
+    </div>
+  </aside>
 
   <!-- ── Settings modal ─────────────────────────────────────────────── -->
   <div id="settings-modal" class="modal" hidden>
@@ -80,26 +103,120 @@
       </div>
     </section>
 
+    <section class="card examples-card" id="examples-card">
+      <div class="examples-header">
+        <h2>Try an example</h2>
+        <span class="subtle">Click any example to load it. Then hit Solve.</span>
+      </div>
+      <div class="examples-tabs" role="tablist">
+        <button class="ex-tab active" data-cat="algebra">Algebra</button>
+        <button class="ex-tab" data-cat="calculus">Calculus</button>
+        <button class="ex-tab" data-cat="trig">Trig &amp; identities</button>
+        <button class="ex-tab" data-cat="hard">Hard / numeric</button>
+        <button class="ex-tab" data-cat="nl">Natural language</button>
+      </div>
+      <div id="examples-list" class="examples-list"></div>
+    </section>
+
     <section class="card input-card">
-      <h2>Solve</h2>
-      <p class="hint">Enter SymPy syntax, LaTeX, or a natural-language question.
-        <span class="subtle">⌘/Ctrl + Enter to submit.</span></p>
+      <div class="input-header">
+        <h2>Solve</h2>
+        <span class="subtle">SymPy · LaTeX · natural language. <span class="kbd">⌘/Ctrl + Enter</span> submits.</span>
+      </div>
+
+      <div class="intent-row" id="intent-row" role="tablist"
+           title="Intent — tell the engine what you want done">
+        <span class="intent-label">Intent</span>
+        <button class="intent-btn active" data-intent="auto" title="Let the engine decide from input">auto</button>
+        <button class="intent-btn" data-intent="solve" title="Find the variable that satisfies an equation">solve</button>
+        <button class="intent-btn" data-intent="integrate" title="Compute an integral">∫</button>
+        <button class="intent-btn" data-intent="differentiate" title="Compute a derivative">d/dx</button>
+        <button class="intent-btn" data-intent="factor" title="Factor a polynomial">factor</button>
+        <button class="intent-btn" data-intent="expand" title="Expand a product">expand</button>
+        <button class="intent-btn" data-intent="simplify" title="Simplify an expression">simplify</button>
+        <button class="intent-btn" data-intent="limit" title="Compute a limit (use Limit(...) syntax)">limit</button>
+        <button class="intent-btn" data-intent="evaluate" title="Compute a numerical value">evaluate</button>
+      </div>
+
       <textarea id="input" rows="4" spellcheck="false"
-        placeholder="e.g. solve x^2 - 5*x + 6 = 0
-e.g. \int_{0}^{1} x^2 dx
-e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
+        placeholder="Click an example above, or type a math problem here.
+e.g. Eq(x**2 - 5*x + 6, 0)
+e.g. Integral(sin(x), (x, 0, pi))
+e.g. what is the derivative of x cubed"></textarea>
+
       <div class="row">
         <button id="solve-btn">Solve</button>
+        <button id="cheatsheet-toggle" class="subtle-btn">syntax help</button>
         <span id="hint" class="subtle"></span>
+      </div>
+
+      <div id="cheatsheet" class="cheatsheet" hidden>
+        <div class="cheatsheet-grid">
+          <div>
+            <h4>SymPy syntax</h4>
+            <ul>
+              <li><code>x**2 + 3*x - 4</code> &mdash; expressions, <code>**</code> for power</li>
+              <li><code>Eq(x**2 - 5*x + 6, 0)</code> &mdash; equation</li>
+              <li><code>Integral(f, (x, a, b))</code> &mdash; definite</li>
+              <li><code>Integral(f, x)</code> &mdash; indefinite</li>
+              <li><code>Derivative(f, x)</code></li>
+              <li><code>Limit(f, x, point)</code></li>
+              <li>Constants: <code>pi</code>, <code>E</code>, <code>I</code>, <code>oo</code> (∞)</li>
+              <li>Functions: <code>sin cos tan exp log sqrt</code></li>
+            </ul>
+          </div>
+          <div>
+            <h4>LaTeX (must contain a backslash)</h4>
+            <ul>
+              <li><code>\int_{0}^{1} x^2 dx</code></li>
+              <li><code>\sin(x)^2 + \cos(x)^2</code></li>
+              <li><code>\frac{d}{dx} x^3</code></li>
+              <li><code>\lim_{x\to 0} \frac{\sin x}{x}</code></li>
+            </ul>
+          </div>
+          <div>
+            <h4>Natural language (Ollama)</h4>
+            <ul>
+              <li><em>"what is the integral of x squared from 0 to 1"</em></li>
+              <li><em>"differentiate sin(x) times x"</em></li>
+              <li><em>"factor x squared minus four"</em></li>
+              <li class="subtle">~5–30s via the local model</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Intent buttons</h4>
+            <ul>
+              <li><b>auto</b> &mdash; engine decides (good for most inputs)</li>
+              <li><b>factor / expand / simplify</b> &mdash; force the dispatch when input is a bare expression like <code>x**4 - 16</code></li>
+              <li><b>solve</b> &mdash; wraps your input as an equation</li>
+            </ul>
+          </div>
+        </div>
       </div>
     </section>
 
+    <section class="card ranker-preview-card" id="ranker-preview-card" hidden>
+      <div class="row" style="justify-content: space-between; margin-top: 0;">
+        <h2 style="margin: 0;">Ranker preview <span class="subtle" style="text-transform: none; letter-spacing: 0; font-size: 11px;">— what the engine would try first, in order</span></h2>
+        <button id="ranker-preview-close" class="subtle-btn">hide</button>
+      </div>
+      <p class="hint" id="ranker-preview-hint">Type or click an example above; the engine's UCB1 ranking for the inferred problem-type and signature shows here, before you click Solve.</p>
+      <div id="ranker-preview-body"></div>
+    </section>
+
     <section class="card answer-card" id="answer-card" hidden>
-      <h2>Answer</h2>
+      <div class="row" style="justify-content: space-between; align-items: baseline; margin: 0;">
+        <h2 style="margin: 0;">Answer</h2>
+        <button id="answer-toggle-render" class="subtle-btn"
+                title="Toggle between rendered math and raw SymPy text">show raw</button>
+      </div>
+      <div class="answer-rendered" id="answer-rendered" hidden></div>
       <div class="answer" id="answer">—</div>
       <div class="answer-meta" id="answer-meta"></div>
       <div class="row">
         <button id="explain-btn" class="subtle-btn">Explain in plain English</button>
+        <button id="replay-btn" class="subtle-btn"
+                title="Re-run the same input — useful to show how the ranking has changed since the first solve">⟳ Replay</button>
         <span id="explain-status" class="subtle"></span>
       </div>
       <div id="explain-text" class="explain-text" hidden></div>
@@ -123,6 +240,8 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
         <div class="trace-controls">
           <button id="trace-expand" class="subtle-btn">expand all</button>
           <button id="trace-collapse" class="subtle-btn">collapse</button>
+          <button id="trace-copy-md" class="subtle-btn"
+                  title="Copy this trace as markdown — paste into notes or papers">copy as md</button>
         </div>
       </div>
       <ol class="trace" id="trace"></ol>
@@ -260,13 +379,17 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
     </div>
   </section>
 
-  <!-- ── Hypotheses tab (Phase 5) ───────────────────────────────────── -->
+  <!-- ── Hypotheses tab (Phase 5 + D Identity Wall) ─────────────────── -->
   <section id="tab-hypotheses" class="tabpanel">
     <div class="hyp-toolbar">
       <h2>Hypotheses</h2>
       <p class="hint">Proposed by the engine from patterns in the graph,
         verified (or refuted) by SymPy / numeric sampling / Z3. Verified
         ones become rule nodes you can see on the Graph tab.</p>
+      <div class="hyp-subtabs" role="tablist">
+        <button class="hyp-subtab active" data-view="wall">Identity wall</button>
+        <button class="hyp-subtab" data-view="raw">All hypotheses</button>
+      </div>
       <div class="hyp-controls">
         <select id="hyp-filter-status">
           <option value="">all status</option>
@@ -285,8 +408,29 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
         <button id="hyp-refresh" class="subtle-btn">refresh</button>
       </div>
     </div>
-    <div id="hyp-list" class="hyp-list"></div>
+    <div id="identity-wall" class="identity-wall"></div>
+    <div id="hyp-list" class="hyp-list" hidden></div>
   </section>
+
+  <!-- ── Phase E: toasts + shortcut help ─────────────────────────────── -->
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+  <div id="shortcuts-modal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Keyboard shortcuts</h2>
+        <button id="close-shortcuts" class="subtle-btn">close</button>
+      </div>
+      <table class="shortcuts-table">
+        <tr><td><span class="kbd">⌘/Ctrl</span> + <span class="kbd">Enter</span></td><td>Solve the current input</td></tr>
+        <tr><td><span class="kbd">Alt</span> + <span class="kbd">1</span>..<span class="kbd">6</span></td><td>Switch tabs (Solve · Graph · Database · Insights · Hypotheses · Notebook)</td></tr>
+        <tr><td><span class="kbd">D</span></td><td>Open / close the Demo rail</td></tr>
+        <tr><td><span class="kbd">/</span></td><td>Focus the input box</td></tr>
+        <tr><td><span class="kbd">Esc</span></td><td>Close any open modal or rail</td></tr>
+        <tr><td><span class="kbd">?</span></td><td>Show this help</td></tr>
+      </table>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

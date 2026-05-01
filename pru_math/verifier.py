@@ -12,6 +12,9 @@ Statuses
 - ``inconclusive`` — we could not construct a meaningful check (e.g. symbolic
                      identity with no free variables, or integral over an
                      unbounded region we didn't attempt to sample)
+- ``no_change``    — for SIMPLIFY/FACTOR/EXPAND, the tool returned the input
+                     unchanged. Mathematically valid but useless: the engine
+                     did not actually transform anything.
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ from .parser import ParsedProblem
 VERIFIED = "verified"
 REFUTED = "refuted"
 INCONCLUSIVE = "inconclusive"
+NO_CHANGE = "no_change"
 
 _DEFAULT_TOL = 1e-7
 _SAMPLES = 6
@@ -186,12 +190,47 @@ def _verify_differentiate(problem: ParsedProblem, result: Any) -> VerificationRe
     return _verify_identity(sp.sympify(result), expected, seed=2)
 
 
+def _is_unchanged(result: Any, original: sp.Basic) -> bool:
+    """True iff `result` is the same expression as `original` (structurally,
+    after canonicalization). Catches the case where a SIMPLIFY-family tool
+    returned the input verbatim — mathematically equal, but the engine did
+    not actually transform anything.
+
+    The parser uses ``evaluate=False``, while tool results come back fully
+    evaluated, so direct == on the SymPy tree can return False even when the
+    structures are identical. We normalize both through ``sympify(str(...))``
+    to put them on equal footing.
+    """
+    try:
+        r = sp.sympify(result)
+    except (sp.SympifyError, TypeError, ValueError):
+        return False
+    try:
+        r_norm = sp.sympify(str(r))
+        o_norm = sp.sympify(str(original))
+    except Exception:
+        return r == original
+    return r_norm == o_norm
+
+
 def _verify_simplify(problem: ParsedProblem, result: Any) -> VerificationResult:
+    if _is_unchanged(result, problem.expression):
+        return VerificationResult(
+            NO_CHANGE,
+            "tool returned the input unchanged — no simplification occurred",
+            0,
+        )
     return _verify_identity(sp.sympify(result), problem.expression, seed=3)
 
 
 def _verify_factor_or_expand(problem: ParsedProblem, result: Any) -> VerificationResult:
     # factoring and expansion must be exact rewrites of the input.
+    if _is_unchanged(result, problem.expression):
+        return VerificationResult(
+            NO_CHANGE,
+            "tool returned the input unchanged — no factoring/expansion occurred",
+            0,
+        )
     return _verify_identity(sp.sympify(result), problem.expression, seed=4)
 
 
