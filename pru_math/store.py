@@ -749,6 +749,21 @@ class Store:
             ).fetchall()
         return [self._row_to_problem(r) for r in rows]
 
+    def delete_problem(self, problem_id: int) -> bool:
+        """Delete a problem and its attempts. Phase 11.
+
+        ``attempts`` cascades via the FK declared in :data:`SCHEMA`, so
+        a single ``DELETE`` on the problem row tears down the whole
+        sub-tree. The graph node is *not* touched here — the graph is
+        an orthogonal record of relations, and a problem we deleted
+        from the store may still be referenced (e.g. as evidence on a
+        verified hypothesis). Callers that want a clean slate should
+        also drop the corresponding ``p:<id>`` node from the graph.
+        """
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM problems WHERE id = ?", (int(problem_id),))
+            return cur.rowcount > 0
+
     def attempt_timeline(self, limit: int = 500) -> list[dict[str, Any]]:
         """Recent attempts as plain dicts, suitable for charts / dashboards."""
         with self._cursor() as cur:

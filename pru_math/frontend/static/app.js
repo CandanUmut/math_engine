@@ -22,7 +22,7 @@ function pct(n) {
 
 /* ── Tabs ─────────────────────────────────────────────────────────── */
 
-const TABS = ["solve", "graph", "database", "insights", "hypotheses"];
+const TABS = ["solve", "graph", "database", "insights", "hypotheses", "notebook"];
 function activateTab(name) {
   TABS.forEach((t) => {
     const btn = document.querySelector(`.tab[data-tab="${t}"]`);
@@ -34,6 +34,7 @@ function activateTab(name) {
   if (name === "database") loadDbTable(currentDbView);
   if (name === "insights") refreshInsights();
   if (name === "hypotheses") refreshHypotheses();
+  if (name === "notebook") refreshNotebook();
 }
 
 /* ── Stats / status ───────────────────────────────────────────────── */
@@ -293,6 +294,7 @@ async function submitSolve() {
     btn.disabled = false;
     refreshStats();
     refreshRecent();
+    if (activeSessionId !== null) refreshNotebook();
   }
 }
 
@@ -739,6 +741,8 @@ async function onSessionSelect() {
   const v = $("session-select").value;
   activeSessionId = v ? parseInt(v, 10) : null;
   renderActiveSessionPanel();
+  // Phase 11: keep the notebook in lockstep with the dropdown.
+  refreshNotebook();
 }
 
 async function createSession() {
@@ -755,6 +759,7 @@ async function createSession() {
     activeSessionId = created.id;
     titleInput.value = "";
     await refreshSessions();
+    refreshNotebook();
   } catch (err) {
     $("session-status").textContent = "create failed: " + err.message;
   }
@@ -773,6 +778,7 @@ async function renameSession() {
     });
     if (!r.ok) throw new Error(await r.text());
     await refreshSessions();
+    refreshNotebook();
     $("session-status").textContent = "renamed.";
   } catch (err) {
     $("session-status").textContent = "rename failed: " + err.message;
@@ -789,6 +795,7 @@ async function deleteSession() {
     activeSessionId = null;
     await refreshSessions();
     refreshRecent();
+    refreshNotebook();
   } catch (err) {
     $("session-status").textContent = "delete failed: " + err.message;
   }
@@ -807,6 +814,7 @@ async function saveSessionNotes() {
     });
     if (!r.ok) throw new Error(await r.text());
     await refreshSessions();
+    refreshNotebook();
     $("session-status").textContent = "saved.";
   } catch (err) {
     $("session-status").textContent = "save failed: " + err.message;
@@ -838,6 +846,294 @@ async function explainCurrentAnswer() {
 }
 
 let lastSolvedProblemId = null;
+
+/* ── Notebook tab (Phase 11) ──────────────────────────────────────── */
+
+let notebookEditingNotes = false;
+let notebookOriginalNotes = "";
+
+function renderMarkdown(text) {
+  if (!text || !text.trim()) {
+    return '<div class="empty-note">No notes yet — click "edit" to add some.</div>';
+  }
+  if (typeof marked !== "undefined") {
+    try {
+      return marked.parse(text, { breaks: true });
+    } catch (_) { /* fall through */ }
+  }
+  // Fallback: just show the raw text safely-escaped.
+  return `<pre>${escapeHtml(text)}</pre>`;
+}
+
+async function refreshNotebook() {
+  const empty = $("notebook-empty");
+  const body = $("notebook-body");
+  const badge = $("tab-badge-notebook");
+
+  if (activeSessionId == null) {
+    if (empty) empty.hidden = false;
+    if (body) body.hidden = true;
+    if (badge) badge.hidden = true;
+    return;
+  }
+
+  try {
+    const data = await fetch(`/sessions/${activeSessionId}`).then((r) => r.json());
+    if (!data || !data.session) {
+      if (empty) empty.hidden = false;
+      if (body) body.hidden = true;
+      return;
+    }
+    if (empty) empty.hidden = true;
+    if (body) body.hidden = false;
+
+    const s = data.session;
+    $("notebook-title").textContent = s.title || `Session #${s.id}`;
+    $("notebook-meta").textContent =
+      `#${s.id} · updated ${s.updated_at} · ${(data.problems || []).length} problem(s)`;
+
+    if (badge) {
+      const n = (data.problems || []).length;
+      badge.hidden = n === 0;
+      badge.textContent = String(n);
+    }
+
+    notebookOriginalNotes = s.notes_markdown || "";
+    if (!notebookEditingNotes) {
+      $("notebook-notes-rendered").innerHTML = renderMarkdown(notebookOriginalNotes);
+      $("notebook-notes-editor").value = notebookOriginalNotes;
+    }
+
+    await renderNotebookProblems(data.problems || []);
+  } catch (err) {
+    if (empty) empty.hidden = false;
+    if (body) body.hidden = true;
+  }
+}
+
+async function renderNotebookProblems(problems) {
+  const host = $("notebook-problems");
+  if (!host) return;
+  if (!problems.length) {
+    host.innerHTML =
+      '<div class="subtle" style="padding:12px">No problems attached to this session yet. Solve one in the Solve tab while this session is selected, or click "+ new problem".</div>';
+    return;
+  }
+
+  // Pull every problem's attempts in parallel.
+  const detailed = await Promise.all(problems.map(async (p) => {
+    try {
+      const r = await fetch(`/problems/${p.id}`).then((r) => r.json());
+      return { problem: p, attempts: (r.attempts || []) };
+    } catch (_) {
+      return { problem: p, attempts: [] };
+    }
+  }));
+
+  // Build the session-options list once for the move-to-session dropdowns.
+  const sessionOpts = ['<option value="">(detach)</option>']
+    .concat(sessionsCache.map((s) =>
+      `<option value="${s.id}"${s.id === activeSessionId ? " selected" : ""}>#${s.id} ${escapeHtml(s.title)}</option>`));
+
+  host.innerHTML = detailed.map(({ problem, attempts }) =>
+    notebookProblemCard(problem, attempts, sessionOpts.join(""))
+  ).join("");
+
+  // Wire up actions (event delegation would also work; per-card handlers
+  // are easier to follow here).
+  host.querySelectorAll('[data-action]').forEach((el) => {
+    el.addEventListener("click", onNotebookAction);
+  });
+  host.querySelectorAll('[data-action-change]').forEach((el) => {
+    el.addEventListener("change", onNotebookAction);
+  });
+}
+
+function notebookProblemCard(problem, attempts, sessionOptions) {
+  const chosen = attempts.find((a) => a.verification_status === "verified")
+              || attempts[attempts.length - 1] || {};
+  const v = chosen.verification_status;
+  const cv = chosen.cross_verify_status;
+  const cvBadge = cv
+    ? `<span class="tag ${CV_CLS(cv)}">cross: ${escapeHtml(cv)}${chosen.cross_verify_tool ? " · " + escapeHtml(chosen.cross_verify_tool) : ""}</span>`
+    : "";
+  const ans = chosen.result_pretty ?? chosen.error ?? "(no answer)";
+  return `<article class="nb-problem" data-pid="${problem.id}">
+    <div class="nb-problem-header">
+      <span class="id">#${problem.id}</span>
+      <span class="raw" title="${escapeHtml(problem.raw_input || "")}">${escapeHtml(problem.raw_input || "")}</span>
+      <span class="when">${escapeHtml(problem.created_at || "")}</span>
+    </div>
+    <div class="nb-problem-answer">${escapeHtml(String(ans))}</div>
+    <div class="nb-problem-meta">
+      ${tag(problem.problem_type)}
+      ${tag(problem.source_format)}
+      ${tag(chosen.tool ? `${chosen.tool}.${(chosen.approach || "").replace(/^[^.]+\./, "")}` : "")}
+      ${v ? tag(v, VERIFY_CLS(v)) : ""}
+      ${cvBadge}
+      ${tag(`${attempts.length} attempt${attempts.length === 1 ? "" : "s"}`)}
+    </div>
+    <div class="nb-problem-actions">
+      <button class="subtle-btn" data-action="explain" data-pid="${problem.id}">explain</button>
+      <button class="subtle-btn" data-action="similar" data-pid="${problem.id}">similar</button>
+      <select data-action-change="move-session" data-pid="${problem.id}">${sessionOptions}</select>
+      <button class="subtle-btn" data-action="delete" data-pid="${problem.id}"
+              style="margin-left:auto;color:var(--bad)">delete</button>
+    </div>
+    <div class="nb-explain" id="nb-explain-${problem.id}" hidden></div>
+  </article>`;
+}
+
+async function onNotebookAction(e) {
+  const el = e.currentTarget;
+  const action = el.dataset.action || el.dataset.actionChange;
+  const pid = el.dataset.pid;
+  if (!action || !pid) return;
+
+  if (action === "explain") {
+    const out = $(`nb-explain-${pid}`);
+    out.hidden = false;
+    out.textContent = "asking…";
+    try {
+      const r = await fetch(`/explain/${pid}`, { method: "POST" });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      out.innerHTML = escapeHtml(data.text || "(no narration)") +
+        `<span class="src">source: ${escapeHtml(data.source || "?")}` +
+        (data.model ? ` · ${escapeHtml(data.model)}` : "") +
+        (data.reason ? ` · ${escapeHtml(data.reason)}` : "") + "</span>";
+    } catch (err) {
+      out.textContent = "explain failed: " + err.message;
+    }
+    return;
+  }
+
+  if (action === "similar") {
+    activateTab("solve");
+    loadSimilarFor(pid);
+    return;
+  }
+
+  if (action === "delete") {
+    if (!confirm(`Delete problem #${pid}? Its attempts go too. The hypothesis row stays but loses one supporter.`)) return;
+    try {
+      const r = await fetch(`/problems/${pid}`, { method: "DELETE" });
+      if (!r.ok) throw new Error(await r.text());
+      refreshStats();
+      refreshRecent();
+      refreshNotebook();
+    } catch (err) {
+      alert("delete failed: " + err.message);
+    }
+    return;
+  }
+
+  if (action === "move-session") {
+    const target = el.value;
+    const newSid = target === "" ? null : parseInt(target, 10);
+    try {
+      const r = await fetch(`/problems/${pid}/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: newSid }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      refreshNotebook();
+    } catch (err) {
+      alert("move failed: " + err.message);
+    }
+    return;
+  }
+}
+
+function startNotesEdit() {
+  notebookEditingNotes = true;
+  $("notebook-notes-rendered").hidden = true;
+  $("notebook-notes-editor").hidden = false;
+  $("notebook-notes-edit").hidden = true;
+  $("notebook-notes-save").hidden = false;
+  $("notebook-notes-cancel").hidden = false;
+  $("notebook-notes-editor").focus();
+}
+
+function cancelNotesEdit() {
+  notebookEditingNotes = false;
+  $("notebook-notes-editor").value = notebookOriginalNotes;
+  $("notebook-notes-editor").hidden = true;
+  $("notebook-notes-rendered").hidden = false;
+  $("notebook-notes-edit").hidden = false;
+  $("notebook-notes-save").hidden = true;
+  $("notebook-notes-cancel").hidden = true;
+}
+
+async function saveNotesEdit() {
+  if (activeSessionId == null) return;
+  const notes = $("notebook-notes-editor").value;
+  try {
+    const r = await fetch(`/sessions/${activeSessionId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notes_markdown: notes }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    notebookOriginalNotes = notes;
+    notebookEditingNotes = false;
+    $("notebook-notes-rendered").innerHTML = renderMarkdown(notes);
+    $("notebook-notes-editor").hidden = true;
+    $("notebook-notes-rendered").hidden = false;
+    $("notebook-notes-edit").hidden = false;
+    $("notebook-notes-save").hidden = true;
+    $("notebook-notes-cancel").hidden = true;
+    // Sync the small Solve-tab notes textarea + sessionsCache.
+    await refreshSessions();
+  } catch (err) {
+    alert("save failed: " + err.message);
+  }
+}
+
+async function attachLastSolveToSession() {
+  if (activeSessionId == null || lastSolvedProblemId == null) {
+    alert("Solve a problem first, then come back to this session.");
+    return;
+  }
+  try {
+    const r = await fetch(`/problems/${lastSolvedProblemId}/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: activeSessionId }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    refreshNotebook();
+  } catch (err) {
+    alert("attach failed: " + err.message);
+  }
+}
+
+async function exportSessionBundle() {
+  if (activeSessionId == null) return;
+  try {
+    const r = await fetch(`/sessions/${activeSessionId}/export`);
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)],
+                          { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const slug = (data.session?.title || "session").replace(/\s+/g, "-").toLowerCase();
+    a.href = url;
+    a.download = `pru-session-${slug}-${stamp}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert("export failed: " + err.message);
+  }
+}
+
+function jumpToSolveForNewProblem() {
+  activateTab("solve");
+  $("input")?.focus();
+}
 
 /* ── Settings modal (Phase 6) ─────────────────────────────────────── */
 
@@ -1097,6 +1393,14 @@ document.addEventListener("DOMContentLoaded", () => {
   $("session-delete")?.addEventListener("click", deleteSession);
   $("session-save-notes")?.addEventListener("click", saveSessionNotes);
   $("explain-btn")?.addEventListener("click", explainCurrentAnswer);
+
+  // Phase 11: notebook tab
+  $("notebook-notes-edit")?.addEventListener("click", startNotesEdit);
+  $("notebook-notes-cancel")?.addEventListener("click", cancelNotesEdit);
+  $("notebook-notes-save")?.addEventListener("click", saveNotesEdit);
+  $("notebook-attach-current")?.addEventListener("click", attachLastSolveToSession);
+  $("notebook-export")?.addEventListener("click", exportSessionBundle);
+  $("notebook-new-problem")?.addEventListener("click", jumpToSolveForNewProblem);
 
   // Phase 6: settings modal + DB export/import
   $("open-settings")?.addEventListener("click", openSettings);

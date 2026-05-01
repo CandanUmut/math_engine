@@ -35,6 +35,7 @@ signature classes get flagged with their working fallback.
 | 8     | Notebook sessions · Ollama narrator                         | **done** |
 | 9     | Rewrite-based search using verified identities              | **done** |
 | 10    | Distribution: pyproject · console scripts · Docker · read-only | **done** |
+| 11    | Notebook view UI · per-problem actions · session-scoped export | **done** |
 
 The Phase 5 success criterion — "the system has proposed and verified at
 least one identity or shortcut that was not explicitly given to it" —
@@ -87,6 +88,20 @@ with `uses_rule` edges back to the supporting problems.
 - **Self-confidence as tiebreak**: each tool's `can_handle(fingerprint)` returns a confidence in `[0, 1]`. The registry sorts candidates by confidence; the learner uses original input order as a deterministic tiebreaker so a cold-start problem prefers the high-confidence tool's approach.
 - **`GET /tools`** lists every registered tool with its availability and class name.
 - **End-to-end**: with the default registry (SymPy + numeric + Z3, Wolfram unavailable), `Integral(x**2, (x, 0, 1))` is solved by SymPy and cross-verified `agree` by numeric quadrature; quadratics are solved by `sympy.roots` and cross-verified by either numeric or Z3 depending on which is picked first.
+
+### What Phase 11 adds
+
+The session backend has been rich since Phase 8; Phase 11 turns it into
+a research-log UI a working mathematician would actually want to use.
+
+- **Notebook tab** in the topbar (with a count badge that mirrors the active session's problem count). When no session is selected it shows a short prompt; once a session is active, it renders the title, last-updated metadata, and an action row with "attach last solve", "export session", and "+ new problem".
+- **Markdown notes** rendered with `marked.js` (loaded via CDN — no bundler step). Click "edit" to turn the rendered view into a textarea; click "save" to PUT the new markdown back to `/sessions/{id}` and re-render. The same notes string round-trips with the smaller editor on the Solve tab.
+- **Per-problem cards** in chronological order, each showing: id, raw input, problem type, source format, the chosen tool/approach, the verification badge, the cross-verify badge if any, attempt count, and the answer. Inline action row:
+  - **explain** — POSTs to `/explain/{id}` and shows the Ollama (or deterministic-fallback) narration inline, with a small `source: ollama|deterministic` tag so users always know what they're reading.
+  - **similar** — jumps to the Solve tab and surfaces the K nearest past problems for that one.
+  - **move-to-session** — a dropdown listing every session; switching reassigns the problem via the existing `POST /problems/{id}/session` endpoint and re-renders.
+  - **delete** — a new `DELETE /problems/{id}` endpoint; cascades attempts via the FK and drops the corresponding `p:<id>` node from the graph so the four UI tabs stay in lockstep.
+- **Session-scoped export** — a new `GET /sessions/{id}/export` endpoint returns a self-contained JSON bundle scoped to one session: just its problems, just their attempts, the relevant `tool_outcomes` rows (matched on signature), the hypotheses whose evidence references at least one of those problems, and a graph subgraph induced by the kept nodes. The bundle uses the same `schema_version` as the full export, so it round-trips cleanly through `POST /db/import` — a clean primitive for sharing one focused notebook without leaking the whole engine state.
 
 ### What Phase 10 adds
 
@@ -283,7 +298,7 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-195 tests covering the parser (three formats), fingerprint determinism
+204 tests covering the parser (three formats), fingerprint determinism
 and similarity, SymPy tool dispatch for every supported problem type,
 the verifier against correct and wrong candidates, the SQLite store,
 the graph (node/edge add, similarity edges, persistence round-trip,

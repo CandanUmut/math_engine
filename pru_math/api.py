@@ -303,6 +303,17 @@ def create_app(store: Store | None = None,
         sid = store.create_session(title=title, notes_markdown=notes)
         return _session_to_dict(store.get_session(sid))   # type: ignore[arg-type]
 
+    @app.get("/sessions/{session_id}/export")
+    def export_session(session_id: int) -> dict[str, Any]:
+        """Phase 11: bundle for one session — its problems, attempts,
+        relevant tool_outcomes and hypotheses, plus the induced graph
+        subgraph. Round-trips through POST /db/import."""
+        from .exporter import export_session_bundle
+        try:
+            return export_session_bundle(store, graph, session_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+
     @app.get("/sessions/{session_id}")
     def get_session(session_id: int) -> dict[str, Any]:
         s = store.get_session(session_id)
@@ -335,6 +346,24 @@ def create_app(store: Store | None = None,
         if not ok:
             raise HTTPException(404, f"no session with id={session_id}")
         return {"ok": True}
+
+    @app.delete("/problems/{problem_id}")
+    def delete_problem(problem_id: int) -> dict[str, Any]:
+        """Phase 11: delete a problem and its attempts. Also drops the
+        corresponding ``p:<id>`` node from the graph so views stay in sync."""
+        if not store.get_problem(problem_id):
+            raise HTTPException(404, f"no problem with id={problem_id}")
+        ok = store.delete_problem(problem_id)
+        # Best-effort graph cleanup; never fail the API if the node is gone.
+        try:
+            from .graph import problem_node
+            node = problem_node(problem_id)
+            if node in graph.graph:
+                graph.graph.remove_node(node)
+                graph.commit()
+        except Exception:
+            pass
+        return {"ok": bool(ok), "problem_id": problem_id}
 
     @app.post("/problems/{problem_id}/session")
     def attach_problem_to_session(problem_id: int,
