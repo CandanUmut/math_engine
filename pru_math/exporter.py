@@ -75,6 +75,122 @@ def export_bundle(store: Store, graph: RelationalGraph) -> dict[str, Any]:
     return bundle
 
 
+def export_session_bundle(
+    store: Store, graph: RelationalGraph, session_id: int,
+) -> dict[str, Any]:
+    """Phase 11: a bundle scoped to a single session.
+
+    Includes:
+
+    - the session row
+    - every problem with this ``session_id``
+    - every attempt for those problems
+    - tool_outcomes restricted to the signatures of those problems
+    - hypotheses whose ``support_problem_ids`` evidence references at
+      least one of those problems (best-effort; the column is JSON)
+    - a graph subgraph induced by the kept problem nodes (1-hop) so
+      the relational view ships intact
+
+    The same ``schema_version`` is used so a session bundle round-trips
+    through ``import_bundle`` cleanly. The session itself is included
+    in a top-level ``"session"`` field; the importer ignores it (it
+    only reads ``tables``), but downstream tools / UIs can use it to
+    display "imported from session #N: <title>" provenance.
+    """
+    import json
+    bundle: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "tables": {k: [] for k in _TABLE_COLUMNS},
+    }
+
+    # Capture the session metadata up front so the bundle is self-describing.
+    with store._cursor() as cur:    # noqa: SLF001
+        srow = cur.execute(
+            "SELECT id, title, notes_markdown, created_at, updated_at "
+            "FROM sessions WHERE id = ?", (int(session_id),),
+        ).fetchone()
+        if srow is None:
+            raise ValueError(f"no session with id={session_id}")
+        bundle["session"] = dict(srow)
+
+        # Problems in this session.
+        prob_cols = _TABLE_COLUMNS["problems"]
+        prob_rows = cur.execute(
+            f"SELECT {', '.join(prob_cols)} FROM problems WHERE session_id = ?",
+            (int(session_id),),
+        ).fetchall()
+        bundle["tables"]["problems"] = [dict(r) for r in prob_rows]
+        problem_ids = {int(r["id"]) for r in prob_rows}
+        signatures = {r["signature"] for r in prob_rows if r["signature"]}
+
+        if problem_ids:
+            placeholders = ",".join("?" * len(problem_ids))
+            attempt_cols = _TABLE_COLUMNS["attempts"]
+            try:
+                arows = cur.execute(
+                    f"SELECT {', '.join(attempt_cols)} FROM attempts "
+                    f"WHERE problem_id IN ({placeholders})",
+                    tuple(problem_ids),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                arows = []
+            bundle["tables"]["attempts"] = [dict(r) for r in arows]
+
+        if signatures:
+            placeholders = ",".join("?" * len(signatures))
+            outcome_cols = _TABLE_COLUMNS["tool_outcomes"]
+            try:
+                orows = cur.execute(
+                    f"SELECT {', '.join(outcome_cols)} FROM tool_outcomes "
+                    f"WHERE signature IN ({placeholders})",
+                    tuple(signatures),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                orows = []
+            bundle["tables"]["tool_outcomes"] = [dict(r) for r in orows]
+
+        # Hypotheses with at least one supporting problem in this session.
+        hyp_cols = _TABLE_COLUMNS["hypotheses"]
+        try:
+            all_hyps = cur.execute(
+                f"SELECT {', '.join(hyp_cols)} FROM hypotheses",
+            ).fetchall()
+        except sqlite3.OperationalError:
+            all_hyps = []
+
+    relevant_hyps: list[dict[str, Any]] = []
+    for h in all_hyps:
+        d = dict(h)
+        try:
+            ev = json.loads(d.get("evidence_json") or "{}")
+        except (TypeError, ValueError):
+            continue
+        sup = ev.get("support_problem_ids") or []
+        if any(int(p) in problem_ids for p in sup if isinstance(p, (int, str))):
+            relevant_hyps.append(d)
+    bundle["tables"]["hypotheses"] = relevant_hyps
+
+    # Build a subgraph induced by the kept problem nodes (1-hop neighbours).
+    bundle["graph_pickle_b64"] = _encode_subgraph(graph, problem_ids)
+    return bundle
+
+
+def _encode_subgraph(graph: RelationalGraph, problem_ids: set[int]) -> str:
+    """Pickle a subgraph induced by the given problem nodes plus their
+    1-hop neighbours so attached tool / signature / rule nodes survive."""
+    import networkx as nx
+    g = graph.graph
+    seeds = {f"p:{pid}" for pid in problem_ids if f"p:{pid}" in g}
+    keep: set[str] = set(seeds)
+    for n in seeds:
+        keep.update(g.successors(n))
+        keep.update(g.predecessors(n))
+    sub = nx.MultiDiGraph(g.subgraph(keep)) if keep else nx.MultiDiGraph()
+    return base64.b64encode(
+        pickle.dumps(sub, protocol=pickle.HIGHEST_PROTOCOL)
+    ).decode("ascii")
+
+
 def import_bundle(store: Store, graph: RelationalGraph,
                   bundle: dict[str, Any]) -> dict[str, int]:
     """Replace ``store`` and ``graph`` contents with the rows in ``bundle``.

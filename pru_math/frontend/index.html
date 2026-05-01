@@ -9,6 +9,8 @@
   <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
   <!-- chart.js for the learning dashboard (Phase 3) -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <!-- marked.js for the notebook view (Phase 11) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -24,6 +26,9 @@
       <button class="tab" data-tab="insights">Insights</button>
       <button class="tab" data-tab="hypotheses">Hypotheses
         <span class="tab-badge" id="tab-badge-hypotheses" hidden>0</span>
+      </button>
+      <button class="tab" data-tab="notebook">Notebook
+        <span class="tab-badge" id="tab-badge-notebook" hidden>0</span>
       </button>
     </nav>
     <div class="topbar-stats" id="stats">
@@ -214,6 +219,44 @@ e.g. simplify sin(x)^2 + cos(x)^2"></textarea>
         <h2>By source format</h2>
         <div id="insights-sources"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- ── Notebook tab (Phase 11) ────────────────────────────────────── -->
+  <section id="tab-notebook" class="tabpanel">
+    <div class="notebook-empty" id="notebook-empty">
+      <h2>Notebook</h2>
+      <p class="hint">Pick (or create) a session in the Solve tab to start a research log here. Every problem you solve while a session is active appears chronologically below, with its result, attempts, and an "explain" button. Notes are markdown.</p>
+    </div>
+    <div id="notebook-body" class="notebook-body" hidden>
+      <header class="notebook-header">
+        <div class="notebook-title-row">
+          <h2 id="notebook-title">—</h2>
+          <span id="notebook-meta" class="subtle"></span>
+        </div>
+        <div class="notebook-actions">
+          <button id="notebook-attach-current" class="subtle-btn"
+                  title="Attach the most recently solved problem to this session">attach last solve</button>
+          <button id="notebook-export" class="subtle-btn">export session</button>
+          <button id="notebook-new-problem" class="subtle-btn">+ new problem</button>
+        </div>
+      </header>
+
+      <section class="card notebook-notes-card" id="notebook-notes-card">
+        <div class="row" style="justify-content: space-between; align-items: center;">
+          <span class="subtle" style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em;">notes</span>
+          <div class="row" style="gap: 6px;">
+            <button id="notebook-notes-edit" class="subtle-btn">edit</button>
+            <button id="notebook-notes-save" class="subtle-btn" hidden>save</button>
+            <button id="notebook-notes-cancel" class="subtle-btn" hidden>cancel</button>
+          </div>
+        </div>
+        <div id="notebook-notes-rendered" class="markdown-body"></div>
+        <textarea id="notebook-notes-editor" rows="6" hidden
+                  placeholder="markdown notes for this session…"></textarea>
+      </section>
+
+      <div id="notebook-problems"></div>
     </div>
   </section>
 
