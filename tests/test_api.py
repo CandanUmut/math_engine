@@ -49,7 +49,9 @@ def test_list_and_get_problem(client):
     pid = lst["items"][0]["id"]
     detail = c.get(f"/problems/{pid}").json()
     assert detail["problem"]["id"] == pid
-    assert len(detail["attempts"]) == 1
+    # SIMPLIFY may try multiple approaches when early ones return
+    # ``no_change`` (Phase 11 merge); we just need at least one attempt.
+    assert detail["attempts"]
 
 
 def test_similar_endpoint(client):

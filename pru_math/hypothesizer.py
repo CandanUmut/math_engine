@@ -268,7 +268,13 @@ class Hypothesizer:
         expression, so equality there isn't an identity in the same sense.
         """
         target_types = {PT.SIMPLIFY, PT.EXPAND, PT.FACTOR}
-        # Pull verified attempts joined to problems within the target types.
+        # Pull identity-trustworthy attempts joined to problems within the
+        # target types. ``no_change`` is treated alongside ``verified``:
+        # the tool returned the input unchanged, which is a *kind* of
+        # identity attestation (the input was already in canonical form
+        # for that approach). Pre-Phase-11-merge this case was implicitly
+        # blessed as ``verified``; explicit ``no_change`` is the same
+        # mathematical statement, just an honest UX warning.
         with self.store._cursor() as cur:   # noqa: SLF001
             rows = cur.execute(
                 """
@@ -276,7 +282,7 @@ class Hypothesizer:
                        p.parsed_pretty AS pretty, a.result_repr AS result
                 FROM attempts a
                 JOIN problems p ON p.id = a.problem_id
-                WHERE a.verification_status = 'verified'
+                WHERE a.verification_status IN ('verified', 'no_change')
                   AND a.result_repr IS NOT NULL
                 ORDER BY a.id DESC
                 LIMIT ?
