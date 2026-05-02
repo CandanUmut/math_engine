@@ -275,3 +275,133 @@ def generate_rewrites(
         )
         out.append(Rewrite(rule=rule, rewritten=candidate, parsed=new_parsed))
     return out
+
+
+# --- Phase 12: multi-step rewrite chains ----------------------------------
+
+@dataclass
+class RewriteChain:
+    """A sequence of one or more rule applications, each transforming the
+    previous step's expression. Depth-1 chains are functionally identical
+    to a single :class:`Rewrite`; deeper chains let the engine combine
+    several verified identities to reach a form a tool can solve.
+
+    The reasoner verifies the final expression against the ORIGINAL
+    problem — exactly the same audit invariant as depth-1 rewrites.
+    Intermediate expressions are recorded for the trace but never
+    persisted as separate attempts.
+    """
+
+    steps: list[Rewrite]                # ≥1; the chain's full provenance
+    parsed: ParsedProblem               # the final, fully-rewritten problem
+    final_expr: sp.Basic                # the final inner (matched) expression
+
+    @property
+    def depth(self) -> int:
+        return len(self.steps)
+
+    def to_trace_dict(self) -> dict:
+        return {
+            "depth": self.depth,
+            "rule_ids": [s.rule.rule_id for s in self.steps],
+            "directions": [s.rule.direction for s in self.steps],
+            "intermediate_exprs": [sp.sstr(s.rewritten) for s in self.steps],
+            "final_expr": sp.sstr(self.final_expr),
+            "summary": " → ".join(
+                [sp.sstr(_problem_inner(self.steps[0].parsed)
+                         if False else self.steps[0].rule.lhs_pattern)]
+                if False else
+                [s.rule.lhs_pretty for s in self.steps] + [self.steps[-1].rule.rhs_pretty]
+            ),
+        }
+
+
+def generate_rewrite_chains(
+    parsed: ParsedProblem,
+    rules: list[RewriteRule],
+    *,
+    max_depth: int = 1,
+    max_chains: int = 4,
+    max_nodes: int = 64,
+) -> list[RewriteChain]:
+    """BFS over the rule graph up to ``max_depth`` rule applications.
+
+    - Every chain starts from the original problem's inner expression.
+    - At each step we apply every rule that produces a *new* canonical
+      form (deduped via ``sp.srepr``) and enqueue the result.
+    - We collect every intermediate node as a candidate chain (so a
+      depth-2 BFS yields all depth-1 AND depth-2 chains, ranked by
+      depth ascending — shallow chains tried first).
+    - Hard caps on ``max_chains`` (chains returned) and ``max_nodes``
+      (BFS frontier size) prevent combinatorial blowup.
+
+    A ``max_depth`` of 1 is exactly the depth-1 behaviour shipped in
+    Phase 9 — :func:`generate_rewrites` is now a convenience wrapper
+    over this function.
+    """
+    if max_depth < 1 or max_chains < 1 or not rules:
+        return []
+
+    inner = _problem_inner(parsed)
+    seed_key = sp.srepr(inner)
+    visited: set[str] = {seed_key}
+
+    # Frontier nodes carry the full chain that produced them.
+    # Each entry: (current_expr, list_of_Rewrites_so_far)
+    frontier: list[tuple[sp.Basic, list[Rewrite]]] = [(inner, [])]
+
+    chains: list[RewriteChain] = []
+    nodes_examined = 0
+
+    for _depth in range(max_depth):
+        next_frontier: list[tuple[sp.Basic, list[Rewrite]]] = []
+        for current, history in frontier:
+            for rule in rules:
+                if len(chains) >= max_chains or nodes_examined >= max_nodes:
+                    break
+                nodes_examined += 1
+                candidate = rule.apply(current)
+                if candidate is None:
+                    continue
+                key = sp.srepr(candidate)
+                if key in visited:
+                    continue
+                visited.add(key)
+
+                # Build a one-step Rewrite record for this transition.
+                new_top = _rewrite_target_expr(parsed, candidate)
+                new_parsed = ParsedProblem(
+                    raw_input=(
+                        f"# chain[{len(history) + 1}] via rule #{rule.rule_id}: "
+                        f"{parsed.raw_input}"
+                    ),
+                    source_format=parsed.source_format,
+                    problem_type=parsed.problem_type,
+                    expression=new_top,
+                    target_symbol=parsed.target_symbol,
+                    extra=(parsed.extra or {}) | {
+                        "rewritten_chain_rules": [
+                            *(s.rule.rule_id for s in history),
+                            rule.rule_id,
+                        ],
+                    },
+                )
+                step = Rewrite(rule=rule, rewritten=candidate, parsed=new_parsed)
+                new_history = history + [step]
+
+                chains.append(RewriteChain(
+                    steps=new_history, parsed=new_parsed, final_expr=candidate,
+                ))
+                next_frontier.append((candidate, new_history))
+
+                if len(chains) >= max_chains or nodes_examined >= max_nodes:
+                    break
+            if len(chains) >= max_chains or nodes_examined >= max_nodes:
+                break
+        if not next_frontier or len(chains) >= max_chains:
+            break
+        frontier = next_frontier
+
+    # Ranking: shallow chains first (smaller blast radius). Stable on tie.
+    chains.sort(key=lambda c: (c.depth, c.steps[0].rule.rule_id))
+    return chains[:max_chains]

@@ -39,6 +39,8 @@ SETTABLE_KEYS: dict[str, str] = {
     # Phase 9: rewrite-based search
     "enable_rewriting":      "bool",
     "max_rewrite_attempts":  "int>=0",
+    # Phase 12: multi-step rewrite chains. Depth=1 reduces to Phase 9.
+    "max_rewrite_depth":     "int>=1",
 }
 
 
@@ -66,6 +68,8 @@ def _defaults() -> dict[str, Any]:
         "ollama_model":         CONFIG.ollama_model,
         "enable_rewriting":     os.getenv("PRU_ENABLE_REWRITING", "true").lower() in {"1", "true", "yes"},
         "max_rewrite_attempts": int(os.getenv("PRU_MAX_REWRITE_ATTEMPTS", "2")),
+        # Phase 12: ≥2 enables multi-step chains; 1 keeps Phase 9 behaviour.
+        "max_rewrite_depth":    int(os.getenv("PRU_MAX_REWRITE_DEPTH", "2")),
     }
 
 

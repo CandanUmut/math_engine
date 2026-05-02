@@ -158,6 +158,15 @@ class Reasoner:
         except Exception:
             return 2
 
+    @property
+    def max_rewrite_depth(self) -> int:
+        """Phase 12: how many rule applications to chain before giving up.
+        ``1`` reduces to the Phase-9 single-step behaviour."""
+        try:
+            return max(1, int(runtime_settings.get("max_rewrite_depth")))
+        except Exception:
+            return 2
+
     # -------------------------------------------------------------------
 
     def solve(
@@ -643,18 +652,19 @@ class Reasoner:
         attempts: list[AttemptOutcome],
         trace: list[TraceStep],
     ) -> tuple[tuple[int, ToolResult, VerificationResult] | None, float]:
-        """Try ≤ ``max_rewrite_attempts`` rule-based rewrites of ``parsed``.
+        """Try ≤ ``max_rewrite_attempts`` rule-based rewrite chains.
 
-        Each rewrite is run with the top-ranked primary approach, and
-        verified against the *original* ``parsed`` problem so the audit
-        story stays clean (the engine never claims "x is the answer to A"
-        when it actually solved B). Returns the chosen ``(idx, result,
-        verification)`` if any rewrite verified, plus the total
-        wall-time spent across all rewrite attempts.
+        Phase 12: a "rewrite" can now be a chain of up to
+        ``max_rewrite_depth`` rule applications. Depth-1 reduces to the
+        Phase-9 single-step behaviour. Each chain (depth-1 or deeper)
+        is run with the top-ranked primary approach, and verified
+        against the *original* ``parsed`` problem so the audit story
+        stays clean. Returns the chosen ``(idx, result, verification)``
+        if any chain verified, plus the total wall-time spent.
         """
         # Imported lazily so users who don't have any verified rules
         # never pay the import.
-        from .rewriter import generate_rewrites, load_rules_from_store
+        from .rewriter import generate_rewrite_chains, load_rules_from_store
 
         time_delta = 0.0
 
@@ -662,61 +672,64 @@ class Reasoner:
         if not rules:
             return None, time_delta
 
-        rewrites = generate_rewrites(
-            parsed, rules, max_rewrites=self.max_rewrite_attempts,
+        chains = generate_rewrite_chains(
+            parsed, rules,
+            max_depth=self.max_rewrite_depth,
+            max_chains=self.max_rewrite_attempts,
         )
-        if not rewrites:
+        if not chains:
             return None, time_delta
 
-        # Pick the primary approach to use on rewritten forms — for now
-        # just use the top-ranked candidate. Phase 9+ could re-rank per
-        # rewritten shape, but that doubles the cost for marginal gain.
+        # Pick the primary approach to use on rewritten forms — top
+        # ranked candidate. Could re-rank per rewritten shape, but that
+        # doubles the cost for marginal gain.
         if not ranked:
             return None, time_delta
         primary = ranked[0]
 
         chosen: tuple[int, ToolResult, VerificationResult] | None = None
-        for rw in rewrites:
+        for chain in chains:
+            chain_summary = self._chain_summary(chain)
+            chain_detail = chain.to_trace_dict()
             trace.append(TraceStep(
                 kind="rewrite",
                 summary=(
-                    f"rewrite via rule #{rw.rule.rule_id} "
-                    f"({rw.rule.direction}): "
-                    f"{rw.rule.lhs_pretty} → {rw.rule.rhs_pretty}"
+                    f"rewrite chain (depth {chain.depth}): {chain_summary}"
                 ),
-                detail=rw.to_trace_dict(),
+                detail=chain_detail,
             ))
 
             result = self.registry.solve_with(
                 tool=primary.tool, approach=primary.approach,
-                problem=rw.parsed,
+                problem=chain.parsed,
             )
             time_delta += result.time_ms
             trace.append(TraceStep(
                 kind="tool_call",
                 summary=(
-                    f"[rewrite#{rw.rule.rule_id}] {result.approach} → "
+                    f"[rewrite chain depth {chain.depth}] {result.approach} → "
                     f"{'ok' if result.success else 'error'} "
                     f"in {result.time_ms:.1f} ms"
                 ),
                 detail={
                     "tool": result.tool,
                     "approach": result.approach,
-                    "rewrite_via_rule": rw.rule.rule_id,
-                    "rewritten_expr": rw.to_trace_dict()["rewritten_expr"],
+                    "rewrite_chain_rules": chain_detail["rule_ids"],
+                    "rewrite_chain_depth": chain.depth,
+                    "rewritten_expr": chain_detail["final_expr"],
                     "result_pretty": result.result_pretty,
                     "error": result.error,
                 },
             ))
 
-            # Verify against the ORIGINAL problem, not the rewritten one.
+            # Verify against the ORIGINAL problem, not any intermediate.
             verification: VerificationResult | None = None
             if result.success:
                 verification = verify(parsed, result.result)
                 trace.append(TraceStep(
                     kind="verify",
                     summary=(
-                        f"[rewrite#{rw.rule.rule_id}] verification: "
+                        f"[rewrite chain depth {chain.depth}] verification: "
                         f"{verification.status} "
                         f"({verification.checks} check(s))"
                     ),
@@ -727,6 +740,10 @@ class Reasoner:
                 ))
 
             error_tag = self._error_tag(result, verification)
+            chain_steps_note = (
+                f"(rewrite chain depth {chain.depth} via rules "
+                f"{chain_detail['rule_ids']})"
+            )
             attempt_id = self.store.insert_attempt(
                 problem_id=problem_id,
                 tool=result.tool,
@@ -738,8 +755,7 @@ class Reasoner:
                 verification_detail=verification.detail if verification else None,
                 time_ms=result.time_ms,
                 error=result.error,
-                steps=[*list(result.steps),
-                       f"(rewrite via rule #{rw.rule.rule_id})"],
+                steps=[*list(result.steps), chain_steps_note],
             )
             self.store.upsert_tool_outcome(
                 signature=fp["signature"],
@@ -770,6 +786,18 @@ class Reasoner:
                 break
 
         return chosen, time_delta
+
+    @staticmethod
+    def _chain_summary(chain) -> str:
+        """Compact, human-readable description of a rewrite chain.
+
+        For depth-1 we keep the Phase-9 phrasing ("rule #N: A → B"); for
+        deeper chains we list every step's rule id arrow-separated."""
+        if chain.depth == 1:
+            r = chain.steps[0].rule
+            return f"rule #{r.rule_id} ({r.direction}): {r.lhs_pretty} → {r.rhs_pretty}"
+        rule_ids = " → ".join(f"#{s.rule.rule_id}" for s in chain.steps)
+        return rule_ids
 
     @staticmethod
     def _rank_deltas(before: list[CandidateStats],

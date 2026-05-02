@@ -53,9 +53,13 @@ def test_reasoner_persists_fingerprint_and_attempt(tmp_store: Store, tmp_graph: 
     assert rec is not None
     assert rec.signature == out.fingerprint["signature"]
     attempts = tmp_store.list_attempts(out.problem_id)
-    assert len(attempts) == 1
-    assert attempts[0].tool == "sympy"
-    assert attempts[0].verification_status == "verified"
+    # The multi-attempt loop may try several SIMPLIFY approaches when
+    # earlier ones return ``no_change`` (Phase 11 merge); we just need
+    # at least one verified result attributed to SymPy.
+    assert attempts, "expected at least one persisted attempt"
+    verified = [a for a in attempts
+                if a.verification_status == "verified" and a.tool == "sympy"]
+    assert verified, f"expected ≥1 verified sympy attempt; got {[a.verification_status for a in attempts]}"
 
 
 def test_reasoner_first_problem_has_no_neighbours(

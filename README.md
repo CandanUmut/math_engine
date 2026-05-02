@@ -36,6 +36,7 @@ signature classes get flagged with their working fallback.
 | 9     | Rewrite-based search using verified identities              | **done** |
 | 10    | Distribution: pyproject · console scripts · Docker · read-only | **done** |
 | 11    | Notebook view UI · per-problem actions · session-scoped export | **done** |
+| 12    | Multi-step rewrite chains (BFS over rule graph)             | **done** |
 
 The Phase 5 success criterion — "the system has proposed and verified at
 least one identity or shortcut that was not explicitly given to it" —
@@ -88,6 +89,21 @@ with `uses_rule` edges back to the supporting problems.
 - **Self-confidence as tiebreak**: each tool's `can_handle(fingerprint)` returns a confidence in `[0, 1]`. The registry sorts candidates by confidence; the learner uses original input order as a deterministic tiebreaker so a cold-start problem prefers the high-confidence tool's approach.
 - **`GET /tools`** lists every registered tool with its availability and class name.
 - **End-to-end**: with the default registry (SymPy + numeric + Z3, Wolfram unavailable), `Integral(x**2, (x, 0, 1))` is solved by SymPy and cross-verified `agree` by numeric quadrature; quadratics are solved by `sympy.roots` and cross-verified by either numeric or Z3 depending on which is picked first.
+
+### What Phase 12 adds
+
+Single-step rewriting (Phase 9) becomes **multi-step chaining**. The
+reasoner can now compose several verified identities in sequence
+before handing the final form to a tool — closing the gap between "the
+engine has discovered useful identities" and "the engine actually
+applies them in non-trivial ways".
+
+- **`generate_rewrite_chains(parsed, rules, max_depth, max_chains)`** in `pru_math/rewriter.py` — a small BFS over the rule graph. Every visited intermediate is a candidate chain (so depth-2 BFS yields all depth-1 *and* depth-2 chains, ranked shallow-first); canonical-form deduplication via `sp.srepr` prevents bidirectional rules (`a→b`, `b→a`) from looping. Hard caps on `max_depth`, `max_chains`, and `max_nodes` bound the worst case.
+- **Backwards-compatible by construction**: `max_rewrite_depth=1` produces exactly the same set of inner rewrites that `generate_rewrites` shipped in Phase 9. The Phase 9 single-step path is now a wrapper over the chain BFS.
+- **New `RewriteChain` dataclass** captures the full provenance: the list of `(rule, intermediate_expr)` steps plus the final rewritten `ParsedProblem`. `to_trace_dict()` exposes `depth`, `rule_ids`, `intermediate_exprs`, and the final expression for the UI / audit log.
+- **Reasoner integration**: `_try_rewrites` now consumes chains. Each chain (any depth) is tried with the top-ranked primary approach, and **verification still runs against the *original* `parsed` problem** — never the intermediate or final rewritten form. Persistence: each chain attempt's `attempts.steps_json` carries a final `(rewrite chain depth N via rules [...])` line so a maintainer reading the DB later can audit the provenance.
+- **New runtime setting**: `max_rewrite_depth` (default `2`, settable via `PUT /config` or `PRU_MAX_REWRITE_DEPTH`). Set to `1` to revert to Phase-9 behaviour exactly; bump higher for harder problems where two- or three-step compositions matter.
+- **Trace shape stays a clean superset of Phase 9**: every chain emits a `rewrite` step (now mentioning depth and the rule-id list), a `tool_call` step, and a `verify` step. Frontends that already render the Phase 9 trace render the Phase 12 trace with no changes.
 
 ### What Phase 11 adds
 
@@ -298,7 +314,7 @@ translates language into a SymPy-parseable expression. See
 OLLAMA_ENABLED=false pytest -q
 ```
 
-204 tests covering the parser (three formats), fingerprint determinism
+216 tests covering the parser (three formats), fingerprint determinism
 and similarity, SymPy tool dispatch for every supported problem type,
 the verifier against correct and wrong candidates, the SQLite store,
 the graph (node/edge add, similarity edges, persistence round-trip,

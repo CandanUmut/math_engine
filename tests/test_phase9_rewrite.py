@@ -181,7 +181,8 @@ def test_rewrite_attempts_are_persisted_with_metadata(
     out = r.solve("Eq(sin(z)**2 + cos(z)**2 - 1, 0)")
     attempts = tmp_store.list_attempts(out.problem_id)
     rewrite_attempts = [a for a in attempts
-                        if any("rewrite via rule" in s for s in a.steps)]
+                        if any("rewrite chain" in s or "rewrite via rule" in s
+                               for s in a.steps)]
     assert rewrite_attempts, (
         "expected at least one persisted attempt to carry rewrite metadata"
     )
