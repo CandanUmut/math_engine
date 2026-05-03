@@ -117,7 +117,7 @@ def create_app(store: Store | None = None,
     reasoner = Reasoner(store=store, graph=graph, learner=learner,
                         registry=registry, hypothesizer=hypothesizer)
 
-    app = FastAPI(title="PRU Math Engine", version="0.10.0")
+    app = FastAPI(title="PRU Math Engine", version="0.12.0")
 
     # Phase 10: read-only mode. When PRU_READ_ONLY=true (or the runtime
     # setting flips it on later) the engine refuses any state-changing
