@@ -1,19 +1,128 @@
 # PRU Math Engine
 
-A learning, auditable, relational math reasoner. Not a math solver — a layer
-**above** SymPy / numerical tools / Z3 that decides which tool to call, which
-approach to try, and which sequence of steps to use; learns from every
-problem it solves; and exposes every decision as an inspectable graph.
+> **An interpretable, learning, relational math reasoner.** Type a
+> math problem in SymPy, LaTeX, or English. Watch the engine pick a
+> tool, try it, verify the result with a *different* tool, learn from
+> the outcome, and discover identities on its own — every decision
+> shown as an inspectable trace and graph.
 
-The thesis is the Precomputed Relational Universe (PRU) model: knowledge is
-most efficiently represented as a graph of precomputed relations between
-entities, so solving a new problem is a traversal over that graph rather than
-a from-scratch computation. Applied to math, every problem, every tool call,
-every success and failure becomes a node or edge — and new problems are
-solved by retrieving similar past problems, replaying what worked, adapting,
-and updating the graph.
+```bash
+pip install git+https://github.com/CandanUmut/math_engine.git
+pru-math-server                                # → http://localhost:8000
+```
 
-See `PHILOSOPHY.md` for the longer version, and `SCHEMA.md` for the data model.
+That's the install. The four-tab UI loads, all twelve phases of
+features are live, and a fresh database starts learning from your
+first solve.
+
+## Why this exists
+
+Most "AI math" tools are black boxes (you ask, they answer). Most
+classical solvers (SymPy, Mathematica, Wolfram) are powerful but flat
+— they don't accumulate knowledge between problems. Most theorem
+provers (Lean, Coq) demand domain expertise. **PRU sits between
+them.**
+
+Concretely, PRU:
+
+1. **Decides** which tool to call (SymPy / numeric / Z3 / Wolfram)
+   based on past success on similar-shaped problems.
+2. **Verifies** every answer with an algorithm independent of the
+   one that produced it (numeric quadrature checks SymPy's
+   integrals; Z3 proofs check polynomial roots; sampling checks
+   simplifications).
+3. **Learns** from every attempt. After 100 quadratics, the
+   verify-rate-over-time chart trends upward as the learner picks
+   better approaches first.
+4. **Discovers** identities and routing rules from your solve
+   history. Solve a few trig problems and the engine proposes
+   `sin(x)² + cos(x)² ≡ 1` and proves it.
+5. **Re-uses** verified identities as rewriting rules. Phase 12 lets
+   the engine compose multiple identities in sequence to crack a
+   problem the primary tools couldn't.
+6. **Explains** every step. The reasoning trace, the candidate
+   ranking, the cross-verification — everything is visible to the
+   user.
+
+If any of those mattered to you, keep reading. **[GETTING_STARTED.md](GETTING_STARTED.md)**
+is a 10-minute tour. **[APPLICATIONS.md](APPLICATIONS.md)** has six
+worked examples (homework verification, research notebook, teaching,
+AI-output checking, identity discovery, curriculum design).
+
+## Try it in 30 seconds
+
+```bash
+pip install git+https://github.com/CandanUmut/math_engine.git
+
+pru-math 'Eq(x**2 - 5*x + 6, 0)'         # → [3, 2] verified
+pru-math 'Integral(x**2, (x, 0, 1))'     # → 1/3 cross-verified
+pru-math 'sin(x)**2 + cos(x)**2'         # → 1 (and the engine learns)
+```
+
+Or open the UI:
+
+```bash
+pru-math-server
+# open http://localhost:8000
+```
+
+For Docker, source-clone, dev mode, Ollama setup (English-language
+input), and the full list of examples, see
+**[INSTALL.md](INSTALL.md)** and **[GETTING_STARTED.md](GETTING_STARTED.md)**.
+
+## Comparison
+
+| | PRU Math Engine | SymPy / NumPy directly | Wolfram Alpha | ChatGPT / Claude |
+| --- | --- | --- | --- | --- |
+| Natural-language input | ✅ via Ollama | ❌ | ✅ | ✅ |
+| Symbolic computation | ✅ (uses SymPy) | ✅ | ✅ | ⚠️ hallucinates |
+| Cross-tool verification | ✅ Z3 / numeric | ❌ | ❌ | ❌ |
+| Visible reasoning trace | ✅ every step | ❌ opaque code | ❌ black box | ⚠️ paraphrased |
+| Learns from past solves | ✅ UCB1 over (sig, tool, approach) | ❌ | ❌ | ❌ (no memory) |
+| Discovers identities | ✅ hypothesizer | ❌ | ❌ | ❌ |
+| Inspectable database | ✅ plain SQLite | n/a | ❌ | ❌ |
+| Runs locally | ✅ | ✅ | ❌ cloud | ⚠️ requires API |
+| Open source | ✅ MIT | ✅ | ❌ | ❌ |
+
+## What's in the box
+
+The repo is split across four small documentation files plus the
+code:
+
+- **[GETTING_STARTED.md](GETTING_STARTED.md)** — friendly 10-minute tour
+- **[APPLICATIONS.md](APPLICATIONS.md)** — six worked use cases
+- **[INSTALL.md](INSTALL.md)** — every install path + troubleshooting
+- **[RELEASING.md](RELEASING.md)** — how to publish to PyPI (for maintainers)
+- **[CHANGELOG.md](CHANGELOG.md)** — version history per phase
+- **[PHILOSOPHY.md](PHILOSOPHY.md)** — the "why precomputed-relational?" essay
+- **[SCHEMA.md](SCHEMA.md)** — SQLite schema + graph data model
+
+Below this point: the per-phase breakdown of what was built, the test
+suite, the architecture diagram, and the phase-by-phase
+"what changed" log. Useful for anyone hacking on the engine itself;
+skippable for users.
+
+---
+
+## Architecture (high-level)
+
+A learning, auditable, relational math reasoner. Not a math solver —
+a layer **above** SymPy / numerical tools / Z3 that decides which
+tool to call, which approach to try, and which sequence of steps to
+use; learns from every problem it solves; and exposes every decision
+as an inspectable graph.
+
+The thesis is the Precomputed Relational Universe (PRU) model:
+knowledge is most efficiently represented as a graph of precomputed
+relations between entities, so solving a new problem is a traversal
+over that graph rather than a from-scratch computation. Applied to
+math, every problem, every tool call, every success and failure
+becomes a node or edge — and new problems are solved by retrieving
+similar past problems, replaying what worked, adapting, and updating
+the graph.
+
+See `PHILOSOPHY.md` for the longer version, and `SCHEMA.md` for the
+data model.
 
 ## Status
 
@@ -189,46 +298,15 @@ they influence the next solve.
 - **Hypotheses tab** in the UI — list cards filtered by status / kind, scan-now button, re-verify per row, expandable raw evidence. The tab gains a count badge in the topbar.
 - **Schema**: a new `hypotheses` table with `status`, `kind`, `claim`, `claim_repr`, `fingerprint` (UNIQUE), `evidence_json`, `method`, `verification_detail`, `rule_node`, and timestamps. Indexes on `status` and `kind`. Auto-created on existing databases.
 
-## Install & run
-
-The fastest path:
-
-```bash
-pip install git+https://github.com/CandanUmut/math_engine.git
-pru-math-server
-# open http://localhost:8000
-```
-
-Or, with Z3 included:
-
-```bash
-pip install "pru-math-engine[all] @ git+https://github.com/CandanUmut/math_engine.git"
-```
-
-Or just the CLI:
-
-```bash
-pru-math "Eq(x**2 - 5*x + 6, 0)"
-pru-math "Integral(x**2, (x, 0, 1))"
-pru-math "sin(x)^2 + cos(x)^2"
-```
-
-For Docker, source-clone, dev mode, read-only servers, the Ollama setup,
-runnable examples, sharing accumulated knowledge, and the maintainer's
-PyPI publishing guide, see **[INSTALL.md](INSTALL.md)**.
-
-Optional: copy `.env.example` to `.env` to point at a different SQLite
-file, a different Ollama host, or disable Ollama.
-
 ### Ollama (natural-language input)
 
-The natural-language path shells out to a local Ollama server. If Ollama is
-not running or `OLLAMA_ENABLED=false`, the parser silently skips that path —
-SymPy syntax and LaTeX still work. The LLM never decides math; it only
-translates language into a SymPy-parseable expression. See
-`pru_math/parser.py` for the exact prompt.
+The natural-language path shells out to a local Ollama server. If
+Ollama is not running or `OLLAMA_ENABLED=false`, the parser silently
+skips that path — SymPy syntax and LaTeX still work. The LLM never
+decides math; it only translates language into a SymPy-parseable
+expression. See `pru_math/parser.py` for the exact prompt.
 
-## Architecture
+## Architecture (detail)
 
 ```
 ┌─────────────────────────── GUI (4 tabs) ──────────────────────────────┐

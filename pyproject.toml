@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pru-math-engine"
-version = "0.10.0"
+version = "0.12.0"
 description = "A learning, auditable, relational math reasoner. Not a math solver — a layer above SymPy / numeric / Z3 that decides which tool to call, learns from outcomes, and exposes every decision as an inspectable graph."
 readme = "README.md"
 requires-python = ">=3.11"
